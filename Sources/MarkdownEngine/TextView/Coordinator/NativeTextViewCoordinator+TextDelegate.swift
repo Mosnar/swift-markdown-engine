@@ -108,12 +108,15 @@ extension NativeTextViewCoordinator {
         let safeLocation = min(rawSelRange.location, fullLength)
         let safeSelRange = NSRange(location: safeLocation, length: 0)
         previousCaretLocation = safeSelRange.location
+        PerfTrace.begin(docLength: fullLength)
         if !wtActive {
-            let storageState = WikiLinkService.makeStorageState(
-                from: tv.string,
-                existingMetadata: self.wikiLinkMetadata,
-                textStorage: tv.textStorage
-            )
+            let storageState = PerfTrace.measure("wiki") {
+                WikiLinkService.makeStorageState(
+                    from: tv.string,
+                    existingMetadata: self.wikiLinkMetadata,
+                    textStorage: tv.textStorage
+                )
+            }
             self.wikiLinkMetadata = storageState.metadata
             if storageState.storage != self.lastSyncedText {
                 DispatchQueue.main.async {
@@ -153,11 +156,11 @@ extension NativeTextViewCoordinator {
             nextParagraph
         ] + editedParagraphs
 
-        let backtickCount = tv.string.components(separatedBy: "```").count - 1
+        let backtickCount = PerfTrace.measure("backtick") { tv.string.components(separatedBy: "```").count - 1 }
         let codeBlockStructureChanged = backtickCount != previousBacktickCount
         previousBacktickCount = backtickCount
 
-        let parsed = parsedDocument(for: tv.string)
+        let parsed = PerfTrace.measure("parse") { parsedDocument(for: tv.string) }
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
@@ -165,12 +168,14 @@ extension NativeTextViewCoordinator {
         let preEditActiveTokenIndices = pendingPreEditActiveTokenIndices ?? previousActiveTokenIndices
         pendingPreEditActiveTokenIndices = nil
 
-        activeTokenIndices = MarkdownDetection.computeActiveTokenIndices(
-            selectionRange: safeSelRange,
-            tokens: tokens,
-            in: fullText,
-            suppressed: !tv.isEditable
-        )
+        activeTokenIndices = PerfTrace.measure("activeTok") {
+            MarkdownDetection.computeActiveTokenIndices(
+                selectionRange: safeSelRange,
+                tokens: tokens,
+                in: fullText,
+                suppressed: !tv.isEditable
+            )
+        }
         filterImageEmbedActiveTokens(parsed: parsed, text: fullText, selectionLocation: safeSelRange.location)
         updateAutocorrectSettings(
             tv,
@@ -185,7 +190,9 @@ extension NativeTextViewCoordinator {
             effectiveParagraphCandidates = [NSRange(location: 0, length: fullText.length)]
         }
         // Always restyle paragraphs containing latex/imageEmbed tokens to avoid stale raw text.
-        let latexParagraphs = (latexTokens + blockLatexTokens + parsed.imageEmbedTokens).map { fullText.paragraphRange(for: $0.range) }
+        let latexParagraphs = PerfTrace.measure("latexMap") {
+            (latexTokens + blockLatexTokens + parsed.imageEmbedTokens).map { fullText.paragraphRange(for: $0.range) }
+        }
         effectiveParagraphCandidates.append(contentsOf: latexParagraphs)
         // A table renders as ONE image anchored on the block's FIRST paragraph.
         // When an edit touches any of its rows (typing in a row, or a paste
@@ -203,18 +210,22 @@ extension NativeTextViewCoordinator {
             previousActiveTokenIndices: preEditActiveTokenIndices
         ))
 
-        restyleTextView(tv, paragraphCandidates: effectiveParagraphCandidates, tokens: tokens)
-        updateCodeBlockSelection(textView: tv, tokens: tokens)
+        PerfTrace.measure("restyle") { restyleTextView(tv, paragraphCandidates: effectiveParagraphCandidates, tokens: tokens) }
+        PerfTrace.measure("codeSel") { updateCodeBlockSelection(textView: tv, tokens: tokens) }
         if wtActive {
             previousActiveTokenIndices = activeTokenIndices
+            PerfTrace.end()
             return
         }
-        if let bottomTextView = tv as? NativeTextView,
-           let scrollView = tv.enclosingScrollView {
-            bottomTextView.recalcOverscroll(for: scrollView, debugTag: "textDidChange")
-            (scrollView as? ClampedScrollView)?.clampToInsets()
+        PerfTrace.measure("overscroll") {
+            if let bottomTextView = tv as? NativeTextView,
+               let scrollView = tv.enclosingScrollView {
+                bottomTextView.recalcOverscroll(for: scrollView, debugTag: "textDidChange")
+                (scrollView as? ClampedScrollView)?.clampToInsets()
+            }
         }
         previousActiveTokenIndices = activeTokenIndices
+        PerfTrace.end()
     }
 
     public func textViewDidChangeSelection(_ notification: Notification) {

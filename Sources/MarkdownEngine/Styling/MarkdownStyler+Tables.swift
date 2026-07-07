@@ -29,7 +29,11 @@ extension MarkdownStyler {
         var attrs: [StyledRange] = []
         // Per-content occurrence counter so identical tables get distinct sourceIDs.
         var occurrenceByContentHash: [Int: Int] = [:]
+        var tableCount = 0
+        var renderedCount = 0
+        let tablesT0 = DispatchTime.now().uptimeNanoseconds
         for (idx, token) in ctx.tokens.enumerated() where token.kind == .table {
+            tableCount += 1
             // Tokenizer already drops tables overlapping fenced code, so no re-check here.
             attrs.append((token.range, [.spellingState: 0]))
 
@@ -70,6 +74,7 @@ extension MarkdownStyler {
                 latex: ctx.services.latex,
                 appearance: renderAppearance
             )
+            renderedCount += 1
             let imageBounds = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
             // Wide tables → scrollable mode (NSScrollView overlay); narrow → collapsed.
             let containerWidth = effectiveContainerWidth(for: ctx)
@@ -97,6 +102,10 @@ extension MarkdownStyler {
                 ctx: ctx,
                 attrs: &attrs
             )
+        }
+        if tableCount > 0 {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - tablesT0) / 1_000_000
+            PerfTrace.note { "styleTables scanned=\(tableCount) tables, re-rendered=\(renderedCount) NSImage in \(String(format: "%.2f", ms))ms" }
         }
         return attrs
     }

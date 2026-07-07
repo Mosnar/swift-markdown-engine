@@ -402,11 +402,15 @@ extension NativeTextView {
         guard let tlm = textLayoutManager else { return }
         let visTop = visibleRect.minY
         let visBot = visibleRect.maxY
+        var walked = 0
+        var aboveViewport = 0
         tlm.enumerateTextLayoutFragments(from: tlm.documentRange.location, options: [.ensuresLayout]) { fragment in
+            walked += 1
             let fr = fragment.layoutFragmentFrame
-            if fr.maxY < visTop { return true }
+            if fr.maxY < visTop { aboveViewport += 1; return true }
             if fr.minY > visBot { return false }
             return true
         }
+        PerfTrace.note { "ensureVisibleLayout walked=\(walked) frags, \(aboveViewport) above viewport (wasted)" }
     }
 }

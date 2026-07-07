@@ -244,7 +244,11 @@ extension NativeTextView {
         }
 
         // Settle layout before measuring — stale fragments would yield wrong anchor Ys.
+        let overlayT0 = DispatchTime.now().uptimeNanoseconds
         tlm.ensureLayout(for: tlm.documentRange)
+        PerfTrace.stamp("wideTableOverlay.ensureLayout(fullDoc)",
+                        Double(DispatchTime.now().uptimeNanoseconds - overlayT0) / 1_000_000,
+                        "docLen=\(storage.length)")
 
         storage.enumerateAttribute(.scrollableBlockSourceID, in: fullRange, options: []) { value, attrRange, _ in
             guard let sourceID = value as? Int,
