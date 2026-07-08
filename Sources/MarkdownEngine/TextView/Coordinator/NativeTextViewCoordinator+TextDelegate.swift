@@ -103,21 +103,52 @@ extension NativeTextViewCoordinator {
 
 
         let rawSelRange = tv.selectedRange()
-        let fullLength = (tv.string as NSString).length
+        let docString = tv.string
+        let fullText = docString as NSString
+        let fullLength = fullText.length
         guard !tv.hasMarkedText() else { return }
         let safeLocation = min(rawSelRange.location, fullLength)
         let safeSelRange = NSRange(location: safeLocation, length: 0)
         previousCaretLocation = safeSelRange.location
         PerfTrace.begin(docLength: fullLength)
+
+        // Edit descriptor, hoisted above the wiki sync so both it and the
+        // paragraph scoping below share it.
+        let editedRange = pendingEditedRange ?? tv.textStorage?.editedRange ?? safeSelRange
+        pendingEditedRange = nil
+        let lengthDelta = previousDisplayLength >= 0 ? fullLength - previousDisplayLength : Int.min
+        previousDisplayLength = fullLength
+
         if !wtActive {
             let storageState = PerfTrace.measure("wiki") {
-                WikiLinkService.makeStorageState(
-                    from: tv.string,
-                    existingMetadata: self.wikiLinkMetadata,
+                WikiLinkService.updatedStorageState(
+                    displayText: docString,
+                    editedRange: editedRange,
+                    changeInLength: lengthDelta,
+                    previousStorage: lastComputedStorage,
+                    previousMetadata: wikiLinkMetadata
+                ) ?? WikiLinkService.makeStorageState(
+                    from: docString,
+                    existingMetadata: wikiLinkMetadata,
                     textStorage: tv.textStorage
                 )
             }
             self.wikiLinkMetadata = storageState.metadata
+            self.lastComputedStorage = storageState.storage
+#if DEBUG
+            // Sampled safety net: every 64th keystroke, prove the splice equals
+            // a full rebuild. Remove together with PerfTrace after sign-off.
+            wikiVerifyCounter &+= 1
+            if wikiVerifyCounter % 64 == 0 {
+                let reference = WikiLinkService.makeStorageState(
+                    from: docString,
+                    existingMetadata: wikiLinkMetadata,
+                    textStorage: tv.textStorage
+                )
+                assert(reference.storage == storageState.storage,
+                       "wiki incremental splice diverged from full rebuild")
+            }
+#endif
             if storageState.storage != self.lastSyncedText {
                 DispatchQueue.main.async {
                     self.lastSyncedText = storageState.storage
@@ -126,7 +157,6 @@ extension NativeTextViewCoordinator {
             }
         }
 
-        let fullText = tv.string as NSString
         let paragraphRange = fullText.paragraphRange(for: safeSelRange)
         let documentLength = fullText.length
         let nextLocation = min(documentLength, NSMaxRange(paragraphRange))
@@ -136,8 +166,6 @@ extension NativeTextViewCoordinator {
         let nextParagraph = nextLocation < documentLength
             ? fullText.paragraphRange(for: NSRange(location: nextLocation, length: 0))
             : NSRange(location: NSNotFound, length: 0)
-        let editedRange = pendingEditedRange ?? tv.textStorage?.editedRange ?? safeSelRange
-        pendingEditedRange = nil
         let wtEditedFallback: NSRange? = {
             guard wtActive, let sel = wtInitialSelectionRange else { return nil }
             let docLength = fullText.length

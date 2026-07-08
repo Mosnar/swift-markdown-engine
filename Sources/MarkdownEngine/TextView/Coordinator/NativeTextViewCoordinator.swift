@@ -87,6 +87,16 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
     var previousBacktickCount: Int = 0
 
+    /// Display-text length after the previous textDidChange — yields the edit's
+    /// length delta without retaining the previous text.
+    var previousDisplayLength: Int = -1
+    /// Storage form computed by the previous wiki sync, kept synchronously
+    /// (unlike `lastSyncedText`, which updates via async dispatch and can lag a
+    /// keystroke). This is the splice base for the incremental path.
+    var lastComputedStorage: String = ""
+    /// DEBUG-only sampling counter for verifying splices against full rebuilds.
+    var wikiVerifyCounter: UInt = 0
+
     var pendingEditedRange: NSRange? = nil
     var pendingPreEditActiveTokenIndices: Set<Int>? = nil
     var previousCaretLocation: Int? = nil

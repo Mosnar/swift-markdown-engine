@@ -37,6 +37,8 @@ extension NativeTextViewCoordinator {
             textView.string = displayText
         }
         lastSyncedText = text
+        lastComputedStorage = text
+        previousDisplayLength = (displayText as NSString).length
         let nsDisplay = displayText as NSString
         let fullRange = NSRange(location: 0, length: nsDisplay.length)
 
