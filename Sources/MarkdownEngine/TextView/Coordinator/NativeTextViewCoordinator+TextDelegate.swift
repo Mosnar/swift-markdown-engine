@@ -184,11 +184,11 @@ extension NativeTextViewCoordinator {
             nextParagraph
         ] + editedParagraphs
 
-        let backtickCount = PerfTrace.measure("backtick") { tv.string.components(separatedBy: "```").count - 1 }
+        let backtickCount = PerfTrace.measure("backtick") { MarkdownDetection.tripleBacktickCount(in: fullText) }
         let codeBlockStructureChanged = backtickCount != previousBacktickCount
         previousBacktickCount = backtickCount
 
-        let parsed = PerfTrace.measure("parse") { parsedDocument(for: tv.string) }
+        let parsed = PerfTrace.measure("parse") { parsedDocument(for: docString) }
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
