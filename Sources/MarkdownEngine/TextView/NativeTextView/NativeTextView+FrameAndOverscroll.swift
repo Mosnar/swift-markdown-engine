@@ -400,17 +400,17 @@ extension NativeTextView {
     /// Force TextKit 2 to lay out all fragments within the current visible rect.
     func ensureVisibleLayout() {
         guard let tlm = textLayoutManager else { return }
-        let visTop = visibleRect.minY
         let visBot = visibleRect.maxY
+        // Start at the viewport instead of the document head: walking from the
+        // start forces layout of every fragment above the viewport, making a
+        // keystroke cost O(caret position in document).
+        let start = tlm.textViewportLayoutController.viewportRange?.location
+            ?? tlm.documentRange.location
         var walked = 0
-        var aboveViewport = 0
-        tlm.enumerateTextLayoutFragments(from: tlm.documentRange.location, options: [.ensuresLayout]) { fragment in
+        tlm.enumerateTextLayoutFragments(from: start, options: [.ensuresLayout]) { fragment in
             walked += 1
-            let fr = fragment.layoutFragmentFrame
-            if fr.maxY < visTop { aboveViewport += 1; return true }
-            if fr.minY > visBot { return false }
-            return true
+            return fragment.layoutFragmentFrame.minY <= visBot
         }
-        PerfTrace.note { "ensureVisibleLayout walked=\(walked) frags, \(aboveViewport) above viewport (wasted)" }
+        PerfTrace.note { "ensureVisibleLayout walked=\(walked) frags from viewport" }
     }
 }
