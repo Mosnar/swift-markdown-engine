@@ -35,6 +35,7 @@ extension NativeTextViewCoordinator {
 
         if textView.string != displayText {
             textView.string = displayText
+            parseGeneration &+= 1
         }
         lastSyncedText = text
         lastComputedStorage = text
@@ -152,8 +153,18 @@ extension NativeTextViewCoordinator {
     }
 
     func parsedDocument(for text: String) -> ParsedDocument {
-        if cachedParsedText == text, let cachedParsedDocument {
-            return cachedParsedDocument
+        let length = (text as NSString).length
+        if let cachedParsedDocument, cachedParsedLength == length {
+            // O(1) hit: nothing has edited the storage since the cached parse.
+            if cachedParseGeneration == parseGeneration {
+                return cachedParsedDocument
+            }
+            // Generation moved but the text may still be identical (e.g. an
+            // attribute-only pass): verify once, then it's O(1) again.
+            if let cachedParsedText, cachedParsedText == text {
+                cachedParseGeneration = parseGeneration
+                return cachedParsedDocument
+            }
         }
 
         let tokens = MarkdownTokenizer.parseTokensViaAST(in: text)
@@ -194,6 +205,8 @@ extension NativeTextViewCoordinator {
             imageEmbedTokens: imageEmbedTokens
         )
         cachedParsedText = text
+        cachedParsedLength = length
+        cachedParseGeneration = parseGeneration
         cachedParsedDocument = parsed
         return parsed
     }

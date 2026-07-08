@@ -106,6 +106,13 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
     var cachedParsedText: String?
     var cachedParsedDocument: ParsedDocument?
+    /// Monotonic edit counter: bumped whenever the text storage can have
+    /// changed. Lets `parsedDocument` return cache hits in O(1) instead of an
+    /// O(doc) string compare. Any code that mutates the storage directly
+    /// (bypassing shouldChangeText/textDidChange) must bump this.
+    var parseGeneration: UInt64 = 0
+    var cachedParseGeneration: UInt64 = .max
+    var cachedParsedLength: Int = -1
     // Skip spellcheck property setters when the state wouldn't change.
     var cachedSpellingDisabled: Bool?
 

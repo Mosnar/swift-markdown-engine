@@ -111,6 +111,7 @@ extension NativeTextViewCoordinator {
         let safeSelRange = NSRange(location: safeLocation, length: 0)
         previousCaretLocation = safeSelRange.location
         PerfTrace.begin(docLength: fullLength)
+        parseGeneration &+= 1
 
         // Edit descriptor, hoisted above the wiki sync so both it and the
         // paragraph scoping below share it.
@@ -495,6 +496,7 @@ extension NativeTextViewCoordinator {
     }
 
     public func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+        parseGeneration &+= 1
         if isProgrammaticEdit { return true }
         if isWritingToolsActive { return true }
         // Raw mode: plain-text editing — no smart Markdown input.

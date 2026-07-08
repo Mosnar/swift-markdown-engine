@@ -32,7 +32,7 @@ extension MarkdownTokenizer {
         var newChars = [unichar](repeating: 0, count: newLen)
         if newLen > 0 { ns.getCharacters(&newChars, range: NSRange(location: 0, length: newLen)) }
 
-        let blocks = BlockParser.parse(text)
+        let blocks = BlockParser.parse(text, utf16Chars: newChars)
 
         tokensLock.lock()
         let prevChars = cachedTokenChars

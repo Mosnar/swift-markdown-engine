@@ -48,11 +48,18 @@ enum BlockParser {
     private static var cachedBlocks: [Block]?
 
     /// Splits `text` into gap-free tiling blocks; memoizes the last parse so both per-keystroke callers share one line-scan.
-    static func parse(_ text: String) -> [Block] {
+    /// Pass `utf16Chars` when the caller already extracted the buffer (must match `text`).
+    static func parse(_ text: String, utf16Chars: [unichar]? = nil) -> [Block] {
         let textNS = text as NSString
         let newLen = textNS.length
-        var newChars = [unichar](repeating: 0, count: newLen)
-        if newLen > 0 { textNS.getCharacters(&newChars, range: NSRange(location: 0, length: newLen)) }
+        let newChars: [unichar]
+        if let utf16Chars, utf16Chars.count == newLen {
+            newChars = utf16Chars
+        } else {
+            var buffer = [unichar](repeating: 0, count: newLen)
+            if newLen > 0 { textNS.getCharacters(&buffer, range: NSRange(location: 0, length: newLen)) }
+            newChars = buffer
+        }
 
         cacheLock.lock()
         let prevChars = cachedChars
