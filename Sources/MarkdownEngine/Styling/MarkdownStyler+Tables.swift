@@ -25,6 +25,39 @@ extension MarkdownStyler {
         let rows: [[String]]
     }
 
+    /// Rendered-table image cache. A table's pixels depend only on its source,
+    /// font, colors, and appearance — so identical keys can reuse the NSImage
+    /// instead of re-rendering every inactive table on every keystroke.
+    private static let tableImageCache: NSCache<NSString, NSImage> = {
+        let cache = NSCache<NSString, NSImage>()
+        cache.countLimit = 128
+        return cache
+    }()
+
+    /// Returns the rendered image for `source`, from cache when possible.
+    /// `rendered` is true only when a fresh render actually happened.
+    static func tableImage(
+        for source: String,
+        parsed: ParsedTable,
+        ctx: StylingContext,
+        appearance: NSAppearance
+    ) -> (image: NSImage, rendered: Bool) {
+        let key = "\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|\(appearance.name.rawValue)|\(ctx.configuration.theme.bodyText)|\(ctx.codeBackgroundColor)|\(source)" as NSString
+        if let cached = tableImageCache.object(forKey: key) {
+            return (cached, false)
+        }
+        let image = renderTable(
+            parsed,
+            baseFont: ctx.baseFont,
+            theme: ctx.configuration.theme,
+            codeBackgroundColor: ctx.codeBackgroundColor,
+            latex: ctx.services.latex,
+            appearance: appearance
+        )
+        tableImageCache.setObject(image, forKey: key)
+        return (image, true)
+    }
+
     static func styleTables(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
         // Per-content occurrence counter so identical tables get distinct sourceIDs.
@@ -66,15 +99,13 @@ extension MarkdownStyler {
             // See renderTable: resolve table colors under the text view's real appearance.
             let renderAppearance = ctx.layoutBridge?.firstTextContainer?.textView?.effectiveAppearance
                 ?? NSApp.effectiveAppearance
-            let image = renderTable(
-                parsed,
-                baseFont: ctx.baseFont,
-                theme: ctx.configuration.theme,
-                codeBackgroundColor: ctx.codeBackgroundColor,
-                latex: ctx.services.latex,
+            let (image, rendered) = tableImage(
+                for: source,
+                parsed: parsed,
+                ctx: ctx,
                 appearance: renderAppearance
             )
-            renderedCount += 1
+            if rendered { renderedCount += 1 }
             let imageBounds = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
             // Wide tables → scrollable mode (NSScrollView overlay); narrow → collapsed.
             let containerWidth = effectiveContainerWidth(for: ctx)
