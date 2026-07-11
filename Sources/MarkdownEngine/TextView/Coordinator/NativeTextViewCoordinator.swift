@@ -361,4 +361,40 @@ extension NSTextView {
         }
         return boundingRect
     }
+
+    /// Character geometry normalized for a SwiftUI overlay attached to the
+    /// wrapper's root scroll view. `NSView.convert` accounts for document-view
+    /// offsets, clipping, and scrolling; the final transform changes AppKit's
+    /// bottom-leading Y axis to SwiftUI's top-leading Y axis when necessary.
+    func wrapperAnchorRect(forCharacterRange range: NSRange, using bridge: LayoutBridge?) -> CGRect? {
+        guard range.location != NSNotFound,
+              let bridge,
+              let textContainer,
+              let scrollView = enclosingScrollView else { return nil }
+        var localRect = bridge.boundingRect(forCharacterRange: range, in: textContainer)
+        localRect.origin.x += textContainerOrigin.x
+        localRect.origin.y += textContainerOrigin.y
+        let appKitRect = convert(localRect, to: scrollView)
+        return WrapperCoordinateSpace.topLeadingRect(
+            from: appKitRect,
+            containerHeight: scrollView.bounds.height,
+            isFlipped: scrollView.isFlipped
+        )
+    }
+}
+
+enum WrapperCoordinateSpace {
+    static func topLeadingRect(
+        from appKitRect: CGRect,
+        containerHeight: CGFloat,
+        isFlipped: Bool
+    ) -> CGRect {
+        guard !isFlipped else { return appKitRect }
+        return CGRect(
+            x: appKitRect.minX,
+            y: containerHeight - appKitRect.maxY,
+            width: appKitRect.width,
+            height: appKitRect.height
+        )
+    }
 }

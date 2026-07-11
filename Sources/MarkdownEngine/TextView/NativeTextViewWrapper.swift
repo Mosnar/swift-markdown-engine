@@ -81,7 +81,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// was supplied).
     public var onLinkClick: ((String) -> Void)?
     /// Fires when the pointer enters, moves within, or leaves an automatic link.
-    /// The anchor rectangle is expressed in wrapper viewport coordinates.
+    /// The anchor rectangle is expressed in the wrapper's top-leading SwiftUI
+    /// viewport coordinates.
     public var onLinkHoverChange: ((LinkHoverState?) -> Void)?
     /// Fires whenever the caret rect inside an active wiki-link changes,
     /// so embedders can position a follow-the-caret UI.

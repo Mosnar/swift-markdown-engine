@@ -164,4 +164,20 @@ struct AutomaticLinkTests {
         #expect(options?.contains(.mouseEnteredAndExited) == true)
         #expect(options?.contains(.cursorUpdate) == true)
     }
+
+    @Test("AppKit link geometry is normalized to SwiftUI top-leading coordinates")
+    func normalizesAnchorCoordinates() {
+        let appKitRect = CGRect(x: 24, y: 80, width: 50, height: 20)
+
+        #expect(WrapperCoordinateSpace.topLeadingRect(
+            from: appKitRect,
+            containerHeight: 200,
+            isFlipped: false
+        ) == CGRect(x: 24, y: 100, width: 50, height: 20))
+        #expect(WrapperCoordinateSpace.topLeadingRect(
+            from: appKitRect,
+            containerHeight: 200,
+            isFlipped: true
+        ) == appKitRect)
+    }
 }

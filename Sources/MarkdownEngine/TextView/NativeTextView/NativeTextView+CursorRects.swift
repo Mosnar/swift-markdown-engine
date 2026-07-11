@@ -97,7 +97,7 @@ extension NativeTextView {
                 at: hit.index,
                 effectiveRange: nil
               ) as? String,
-              let anchorRect = viewRect(forCharacterRange: hit.range, using: layoutBridge) else {
+              let anchorRect = wrapperAnchorRect(forCharacterRange: hit.range, using: layoutBridge) else {
             emitAutomaticLinkHover(nil)
             return
         }
