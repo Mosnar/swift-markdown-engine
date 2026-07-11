@@ -54,6 +54,9 @@ public struct AutomaticLinkMatch: Sendable, Equatable {
 public struct NoOpAutomaticLinkProvider: AutomaticLinkProvider {
     public init() {}
     public func matches(in text: String, range: NSRange) -> [AutomaticLinkMatch] { [] }
+    // Distinct from the protocol's default `0` so swapping a real provider in
+    // or out is always detected as a services change by the wrapper.
+    public func fingerprint() -> AnyHashable { ObjectIdentifier(NoOpAutomaticLinkProvider.self) }
 }
 
 /// Hover information for a host-defined automatic link.

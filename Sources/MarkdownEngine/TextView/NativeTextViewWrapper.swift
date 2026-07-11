@@ -366,6 +366,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             scrollView.clampToInsets()
             context.coordinator.refreshActiveLinkCaretRect()
             context.coordinator.updateCodeBlockSelection(textView: textView)
+            textView.refreshAutomaticLinkHover()
         }
         reconcileHeader(textView: textView, context: context)
         return scrollView

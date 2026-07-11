@@ -5,7 +5,26 @@ All notable changes to swift-markdown-engine are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.8.0] - 2026-06-28
+## [Unreleased] — beadazzle/automatic-links fork branch
+
+### Added
+- `AutomaticLinkProvider` service: hosts define links in otherwise plain Markdown
+  text (only AST-approved plain-text ranges; never code, existing links, images,
+  or wiki links). Matches carry an `ActivationPolicy` — `.standard` or
+  `.commandClickWhenEditable`, where ordinary clicks in an editable view are
+  consumed and place the caret instead of activating the link.
+- `NativeTextViewWrapper.onLinkHoverChange`: hover callback for automatic links,
+  reporting the link target, character range, and an anchor rect normalized to
+  the wrapper's top-leading SwiftUI viewport coordinates. Hover is re-evaluated
+  on scroll so the anchor never goes stale under a stationary pointer.
+
+### Changed
+- **Behavioral divergence from upstream:** `NativeTextView` overrides
+  `resetCursorRects()` to do nothing and owns all cursor updates through its
+  own tracking area (`mouseMoved`/`cursorUpdate`/`flagsChanged`). NSTextView's
+  built-in link cursor rects would fight the modifier-dependent cursor of
+  command-click automatic links and flicker. Built-in cursor-rect behaviors
+  (e.g. link tooltips) are disabled for all embedders as a result.
 
 ### Added
 - `MarkdownEditorBus.findQuery` / `findResults`: query-based in-document find. The host posts a

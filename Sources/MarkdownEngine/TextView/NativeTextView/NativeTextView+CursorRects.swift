@@ -79,7 +79,11 @@ extension NativeTextView {
             NSCursor.pointingHand.set()
             return
         }
-        let policy = AutomaticLinkService.activationPolicy(in: textStorage!, at: hit.index)
+        guard let textStorage else {
+            NSCursor.iBeam.set()
+            return
+        }
+        let policy = AutomaticLinkService.activationPolicy(in: textStorage, at: hit.index)
         if policy == .commandClickWhenEditable, modifiers.contains(.command) {
             NSCursor.pointingHand.set()
         } else if policy == .standard {
@@ -90,7 +94,25 @@ extension NativeTextView {
     }
 
     private func updateAutomaticLinkHover(for event: NSEvent) {
-        let viewPoint = convert(event.locationInWindow, from: nil)
+        updateAutomaticLinkHover(at: convert(event.locationInWindow, from: nil))
+    }
+
+    /// Re-evaluates hover from the current pointer position without a mouse
+    /// event. Called on scroll: the text moves under a stationary pointer, so
+    /// the emitted anchor rect (and whether a link is hovered at all) goes
+    /// stale until the next `mouseMoved` otherwise.
+    func refreshAutomaticLinkHover() {
+        guard let window, onLinkHoverChange != nil else { return }
+        let windowPoint = window.mouseLocationOutsideOfEventStream
+        let viewPoint = convert(windowPoint, from: nil)
+        guard visibleRect.contains(viewPoint) else {
+            emitAutomaticLinkHover(nil)
+            return
+        }
+        updateAutomaticLinkHover(at: viewPoint)
+    }
+
+    private func updateAutomaticLinkHover(at viewPoint: CGPoint) {
         guard let hit = linkHit(at: viewPoint),
               let target = textStorage?.attribute(
                 AutomaticLinkService.targetAttribute,
