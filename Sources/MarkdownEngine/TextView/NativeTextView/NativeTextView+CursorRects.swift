@@ -42,6 +42,13 @@ extension NativeTextView {
         applyCursor(at: point, modifiers: event.modifierFlags)
     }
 
+    override func cursorUpdate(with event: NSEvent) {
+        applyCursor(
+            at: convert(event.locationInWindow, from: nil),
+            modifiers: event.modifierFlags
+        )
+    }
+
     /// True when the mouse is inside an embedder-defined exclusion zone
     /// (e.g. a formatting toolbar) and edit-mode I-beam should be suppressed.
     private func isInCursorExclusionZone(_ event: NSEvent) -> Bool {
@@ -121,16 +128,16 @@ extension NativeTextView {
 
         let pInLine = CGPoint(x: pInFrag.x - line.typographicBounds.minX,
                               y: pInFrag.y - line.typographicBounds.minY)
-        let idx = line.characterIndex(for: pInLine)
-        let lineString = line.attributedString
-        guard idx >= 0, idx < lineString.length else { return nil }
+        let indexInFragment = line.characterIndex(for: pInLine)
+        guard indexInFragment >= line.characterRange.location,
+              indexInFragment < NSMaxRange(line.characterRange) else { return nil }
         guard let textContentStorage else { return nil }
         let fragmentStart = textContentStorage.offset(
             from: textContentStorage.documentRange.location,
             to: fragment.rangeInElement.location
         )
         guard fragmentStart != NSNotFound else { return nil }
-        let documentIndex = fragmentStart + line.characterRange.location + idx
+        let documentIndex = fragmentStart + indexInFragment
         guard documentIndex >= 0, documentIndex < textStorage.length else { return nil }
         var effectiveRange = NSRange()
         guard textStorage.attribute(.link, at: documentIndex, effectiveRange: &effectiveRange) != nil else { return nil }

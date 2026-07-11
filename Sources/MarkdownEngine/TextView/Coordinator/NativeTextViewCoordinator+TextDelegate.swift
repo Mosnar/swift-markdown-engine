@@ -431,7 +431,9 @@ extension NativeTextViewCoordinator {
            textView.isEditable,
            let mouseModifiers = (textView as? NativeTextView)?.activeMouseDownModifierFlags,
            !mouseModifiers.contains(.command) {
-            return false
+            textView.window?.makeFirstResponder(textView)
+            textView.setSelectedRange(NSRange(location: charIndex, length: 0))
+            return true
         }
         guard let target = WikiLinkService.resolveIdentifier(link: link, textView: textView, at: charIndex) else {
             return false

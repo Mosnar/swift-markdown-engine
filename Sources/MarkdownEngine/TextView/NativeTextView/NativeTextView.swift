@@ -44,6 +44,7 @@ final class NativeTextView: NSTextView {
     var onLinkHoverChange: ((LinkHoverState?) -> Void)?
     var lastLinkHoverState: LinkHoverState?
     var activeMouseDownModifierFlags: NSEvent.ModifierFlags?
+    var automaticLinkTrackingArea: NSTrackingArea?
     weak var layoutBridge: LayoutBridge?
     var baseFont: NSFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 
@@ -78,6 +79,27 @@ final class NativeTextView: NSTextView {
         if let name = configuration.services.syntaxHighlighter.appearanceDidChangeNotification {
             NotificationCenter.default.post(name: name, object: self)
         }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let automaticLinkTrackingArea {
+            removeTrackingArea(automaticLinkTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [
+                .activeInKeyWindow,
+                .inVisibleRect,
+                .mouseEnteredAndExited,
+                .mouseMoved,
+                .cursorUpdate
+            ],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        automaticLinkTrackingArea = trackingArea
     }
 
     // setMarkedText skips textDidChange, so restyle the marked paragraph to apply markdown attrs.

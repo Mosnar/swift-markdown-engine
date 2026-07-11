@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import Testing
 @testable import MarkdownEngine
 
@@ -74,5 +75,54 @@ struct AutomaticLinkTests {
 
         #expect(AutomaticLinkService.activationPolicy(in: storage, at: 2) == .commandClickWhenEditable)
         #expect(AutomaticLinkService.activationPolicy(in: storage, at: 4) == nil)
+    }
+
+    @Test("ordinary clicks on command-click links are consumed and place the caret")
+    @MainActor
+    func ordinaryClickDoesNotEscapeToLaunchServices() {
+        var text = "bd-1"
+        var isWikiLinkActive = false
+        var clickedTargets: [String] = []
+        let coordinator = NativeTextViewCoordinator(
+            text: Binding(get: { text }, set: { text = $0 }),
+            fontName: "SF Pro",
+            fontSize: 16,
+            isWikiLinkActive: Binding(
+                get: { isWikiLinkActive },
+                set: { isWikiLinkActive = $0 }
+            ),
+            onLinkClick: { clickedTargets.append($0) },
+            onInlineSelectionChange: nil
+        )
+        let textView = NativeTextView(frame: CGRect(x: 0, y: 0, width: 200, height: 40))
+        textView.string = text
+        textView.isEditable = true
+        textView.textStorage?.addAttributes([
+            .link: "beads://bead/bd-1",
+            AutomaticLinkService.activationAttribute: 1
+        ], range: NSRange(location: 0, length: 4))
+        textView.activeMouseDownModifierFlags = []
+
+        let handled = coordinator.textView(
+            textView,
+            clickedOnLink: "beads://bead/bd-1",
+            at: 2
+        )
+
+        #expect(handled)
+        #expect(textView.selectedRange() == NSRange(location: 2, length: 0))
+        #expect(clickedTargets.isEmpty)
+    }
+
+    @Test("native view installs automatic-link mouse tracking")
+    @MainActor
+    func installsMouseTracking() {
+        let textView = NativeTextView(frame: CGRect(x: 0, y: 0, width: 200, height: 40))
+        textView.updateTrackingAreas()
+
+        let options = textView.automaticLinkTrackingArea?.options
+        #expect(options?.contains(.mouseMoved) == true)
+        #expect(options?.contains(.mouseEnteredAndExited) == true)
+        #expect(options?.contains(.cursorUpdate) == true)
     }
 }
