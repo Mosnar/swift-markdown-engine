@@ -27,6 +27,10 @@ extension MarkdownTokenizer {
 
     /// The live tokenizer: block-level tokens + inline AST tokens; fenced code emits only its code-block token.
     static func parseTokensViaAST(in text: String) -> [MarkdownToken] {
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        defer {
+            PerfTrace.note { "🗜️ tokenizer.static \(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
+        }
         let ns = text as NSString
         let newLen = ns.length
         var newChars = [unichar](repeating: 0, count: newLen)
@@ -40,9 +44,13 @@ extension MarkdownTokenizer {
         tokensLock.unlock()
 
         let result: [MarkdownToken]
-        if let prevChars, let prevTokens,
-           let (incr, _) = incrementalTokens(oldChars: prevChars, prevTokens: prevTokens, newChars: newChars, blocks: blocks, ns: ns) {
-            result = incr
+        if let prevChars, let prevTokens {
+            if let diff = BlockParser.scanDiff(old: prevChars, new: newChars) {
+                result = incrementalTokens(oldChars: prevChars, prevTokens: prevTokens, newChars: newChars, blocks: blocks, ns: ns, diff: diff)?.tokens
+                    ?? fullTokens(blocks: blocks, ns: ns)
+            } else {
+                result = prevTokens   // identical text
+            }
         } else {
             result = fullTokens(blocks: blocks, ns: ns)
         }
@@ -51,7 +59,14 @@ extension MarkdownTokenizer {
         return result
     }
 
-    private static func fullTokens(blocks: [Block], ns: NSString) -> [MarkdownToken] {
+    /// Adopt an externally computed parse (DocumentParseState publishes its
+    /// per-keystroke result) so static-path callers hit instead of re-splicing
+    /// against a one-keystroke-stale cache.
+    static func seedCache(chars: [unichar], tokens: [MarkdownToken]) {
+        tokensLock.lock(); cachedTokenChars = chars; cachedTokens = tokens; tokensLock.unlock()
+    }
+
+    static func fullTokens(blocks: [Block], ns: NSString) -> [MarkdownToken] {
         var result: [MarkdownToken] = []
         for block in blocks {
             let delta = block.range.location
@@ -61,22 +76,19 @@ extension MarkdownTokenizer {
         return result
     }
 
-    /// Reuse prefix/suffix tokens (suffix shifted) and re-tokenize only touched blocks; nil to fall back to full.
-    private static func incrementalTokens(oldChars o: [unichar], prevTokens: [MarkdownToken], newChars n: [unichar], blocks: [Block], ns: NSString) -> (tokens: [MarkdownToken], retok: Int)? {
+    /// Reuse prefix/suffix tokens (suffix shifted) and re-tokenize only touched blocks,
+    /// against a precomputed change region; nil to fall back to full.
+    static func incrementalTokens(oldChars o: [unichar], prevTokens: [MarkdownToken], newChars n: [unichar], blocks: [Block], ns: NSString, diff: BufferDiff) -> (tokens: [MarkdownToken], retok: Int)? {
         let oldLen = o.count, newLen = n.count
         guard oldLen > 0, newLen > 0, !blocks.isEmpty else { return nil }
 
-        var p = 0
-        let maxPre = min(oldLen, newLen)
-        while p < maxPre, o[p] == n[p] { p += 1 }
-        var s = 0
-        let maxSuf = maxPre - p
-        while s < maxSuf, o[oldLen - 1 - s] == n[newLen - 1 - s] { s += 1 }
-        let delta = newLen - oldLen
-        let changeStart = p, changeEndNew = newLen - s
+        let delta = diff.delta
+        let changeStart = diff.changeStart, changeEndNew = diff.changeEndNew
+        guard changeStart >= 0, diff.changeEndOld <= oldLen, changeEndNew <= newLen,
+              changeStart <= diff.changeEndOld, changeStart <= changeEndNew else { return nil }
 
         // A fence/block-LaTeX delimiter can pair with a distant partner and ripple far → full tokenization.
-        if BlockParser.hasBlockDelimiter(o, changeStart, oldLen - s)
+        if BlockParser.hasBlockDelimiter(o, changeStart, diff.changeEndOld)
             || BlockParser.hasBlockDelimiter(n, changeStart, changeEndNew) { return nil }
 
         // New blocks touching the changed char range [changeStart, changeEndNew].
@@ -118,7 +130,7 @@ extension MarkdownTokenizer {
     }
 
     /// Cached block-relative tokens for `sub` (computed on miss); a pure memo over the token logic.
-    private static func cachedBlockTokens(kind: BlockKind, sub: String) -> [MarkdownToken] {
+    static func cachedBlockTokens(kind: BlockKind, sub: String) -> [MarkdownToken] {
         blockTokenLock.lock()
         if let cached = blockTokenCache[sub] {
             blockTokenLock.unlock()

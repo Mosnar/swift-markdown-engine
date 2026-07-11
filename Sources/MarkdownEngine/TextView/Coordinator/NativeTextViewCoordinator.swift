@@ -86,6 +86,18 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var previousActiveTokenIndices: Set<Int> = []
     var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
     var previousBacktickCount: Int = 0
+    /// Backtick census baseline captured in shouldChangeTextIn: the pre-edit
+    /// window count around the proposed edit, so textDidChange can update the
+    /// census from the edited window alone instead of rescanning the document.
+    var pendingBacktickWindow: (location: Int, oldLength: Int, oldCount: Int)?
+    /// Set when the storage mutated without the census bookkeeping seeing it
+    /// (IME composition) — forces the next census back to a full scan.
+    var backtickCensusNeedsRescan = false
+    /// DEBUG-only sampling counter for verifying the incremental census.
+    var backtickVerifyCounter: UInt = 0
+    /// Incremental parse state for this editor (buffer + blocks + tokens
+    /// evolve together under the edit descriptor).
+    let parseState = DocumentParseState()
 
     /// Display-text length after the previous textDidChange — yields the edit's
     /// length delta without retaining the previous text.
@@ -98,6 +110,10 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var wikiVerifyCounter: UInt = 0
 
     var pendingEditedRange: NSRange? = nil
+    /// Proposed-edit cycles since the last completed textDidChange. Exactly 1
+    /// means the hoisted editedRange/lengthDelta describe a single tracked
+    /// edit and incremental fast paths may trust them.
+    var pendingEditCount = 0
     var pendingPreEditActiveTokenIndices: Set<Int>? = nil
     var previousCaretLocation: Int? = nil
     /// Drag-select suppressed a restyle; replayed on the next non-drag selection change.

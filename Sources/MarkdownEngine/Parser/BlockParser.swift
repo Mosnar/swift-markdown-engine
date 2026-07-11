@@ -41,6 +41,17 @@ struct Block: Equatable {
     let range: NSRange
 }
 
+/// A resolved contiguous change between two buffer states, in UTF-16 units.
+/// `changeStart ..< changeEndOld` in the old buffer was replaced by
+/// `changeStart ..< changeEndNew` in the new one. The region may be wider
+/// than the minimal diff — splice logic only requires containment.
+struct BufferDiff {
+    let changeStart: Int
+    let changeEndOld: Int
+    let changeEndNew: Int
+    let delta: Int
+}
+
 enum BlockParser {
 
     private static let cacheLock = NSLock()
@@ -66,21 +77,33 @@ enum BlockParser {
         let prevBlocks = cachedBlocks
         cacheLock.unlock()
 
-        // Identical text → return cached (memcmp the buffer, not a slow bridged `String ==`).
-        if let prevChars, let prevBlocks, equalBuffers(prevChars, newChars) {
-            return prevBlocks
-        }
-
-        // Incremental: reparse only the affected block window, else fall back to a full reparse.
-        if let prevChars, let prevBlocks,
-           let (incr, _) = incrementalParse(oldChars: prevChars, oldBlocks: prevBlocks, newChars: newChars, newNS: textNS) {
-            cacheLock.lock(); cachedChars = newChars; cachedBlocks = incr; cacheLock.unlock()
-            return incr
+        let t0 = DispatchTime.now().uptimeNanoseconds
+        if let prevChars, let prevBlocks {
+            // Identical text → memcmp hit (the scan below would walk O(doc)).
+            if equalBuffers(prevChars, newChars) {
+                PerfTrace.note { "🧱 BlockParser.static EQUAL \(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
+                return prevBlocks
+            }
+            if let diff = scanDiff(old: prevChars, new: newChars),
+               let (incr, _) = incrementalParse(oldChars: prevChars, oldBlocks: prevBlocks, newChars: newChars, newNS: textNS, diff: diff) {
+                cacheLock.lock(); cachedChars = newChars; cachedBlocks = incr; cacheLock.unlock()
+                PerfTrace.note { "🧱 BlockParser.static INCR \(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
+                return incr
+            }
         }
 
         let blocks = computeBlocks(text)
         cacheLock.lock(); cachedChars = newChars; cachedBlocks = blocks; cacheLock.unlock()
+        PerfTrace.note { "🧱 BlockParser.static FULL \(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
         return blocks
+    }
+
+    /// Adopt an externally computed parse (DocumentParseState publishes its
+    /// per-keystroke result) so static-path callers — the restyle's
+    /// DocumentAST.parse above all — take the memcmp hit instead of
+    /// re-splicing against a one-keystroke-stale cache.
+    static func seedCache(chars: [unichar], blocks: [Block]) {
+        cacheLock.lock(); cachedChars = chars; cachedBlocks = blocks; cacheLock.unlock()
     }
 
     private static func equalBuffers(_ a: [unichar], _ b: [unichar]) -> Bool {
@@ -89,6 +112,19 @@ enum BlockParser {
         return a.withUnsafeBytes { ap in
             b.withUnsafeBytes { bp in memcmp(ap.baseAddress!, bp.baseAddress!, ap.count) == 0 }
         }
+    }
+
+    /// Common prefix/suffix scan; nil when the buffers are identical.
+    static func scanDiff(old: [unichar], new: [unichar]) -> BufferDiff? {
+        let oldLen = old.count, newLen = new.count
+        var p = 0
+        let maxPre = min(oldLen, newLen)
+        while p < maxPre, old[p] == new[p] { p += 1 }
+        if p == oldLen, oldLen == newLen { return nil }
+        var s = 0
+        let maxSuf = maxPre - p
+        while s < maxSuf, old[oldLen - 1 - s] == new[newLen - 1 - s] { s += 1 }
+        return BufferDiff(changeStart: p, changeEndOld: oldLen - s, changeEndNew: newLen - s, delta: newLen - oldLen)
     }
 
     /// Does `[lo, hi)` (± margin for an edit-boundary delimiter) contain a `$$` or ``` that can ripple?
@@ -106,25 +142,21 @@ enum BlockParser {
         return false
     }
 
-    /// Diff old→new, reparse the affected window, splice between untouched prefix/suffix; nil to fall back to full.
-    private static func incrementalParse(oldChars o: [unichar], oldBlocks: [Block], newChars n: [unichar], newNS: NSString) -> (blocks: [Block], window: Int)? {
+    /// Splice-parse against a precomputed change region (descriptor- or scan-derived):
+    /// reparse the affected block window, splice between untouched prefix/suffix; nil to fall back to full.
+    static func incrementalParse(oldChars o: [unichar], oldBlocks: [Block], newChars n: [unichar], newNS: NSString, diff: BufferDiff) -> (blocks: [Block], window: Int)? {
         guard !oldBlocks.isEmpty else { return nil }
         let oldLen = o.count, newLen = n.count
         guard oldLen > 0, newLen > 0 else { return nil }
 
-        // 1. Common prefix/suffix over the cached UTF-16 buffers (no re-extract).
-        var p = 0
-        let maxPre = min(oldLen, newLen)
-        while p < maxPre, o[p] == n[p] { p += 1 }
-        var s = 0
-        let maxSuf = maxPre - p
-        while s < maxSuf, o[oldLen - 1 - s] == n[newLen - 1 - s] { s += 1 }
-        let delta = newLen - oldLen
-        let changeStart = p
-        let changeEnd = oldLen - s              // [changeStart, changeEnd) in old
+        let delta = diff.delta
+        let changeStart = diff.changeStart
+        let changeEnd = diff.changeEndOld       // [changeStart, changeEnd) in old
+        guard changeStart >= 0, changeEnd <= oldLen, diff.changeEndNew <= newLen,
+              changeStart <= changeEnd, changeStart <= diff.changeEndNew else { return nil }
 
         // A fence/block-LaTeX delimiter in the edit can pair with a distant partner → full reparse.
-        if hasBlockDelimiter(o, changeStart, changeEnd) || hasBlockDelimiter(n, changeStart, newLen - s) {
+        if hasBlockDelimiter(o, changeStart, changeEnd) || hasBlockDelimiter(n, changeStart, diff.changeEndNew) {
             return nil
         }
 
@@ -173,7 +205,7 @@ enum BlockParser {
         return (result, reparsed.count)
     }
 
-    private static func computeBlocks(_ text: String) -> [Block] {
+    static func computeBlocks(_ text: String) -> [Block] {
         let nsText = text as NSString
         let length = nsText.length
         guard length > 0 else { return [] }

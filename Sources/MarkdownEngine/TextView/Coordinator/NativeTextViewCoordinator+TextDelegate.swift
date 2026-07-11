@@ -117,6 +117,11 @@ extension NativeTextViewCoordinator {
         // paragraph scoping below share it.
         let editedRange = pendingEditedRange ?? tv.textStorage?.editedRange ?? safeSelRange
         pendingEditedRange = nil
+        // Exactly one proposed edit since the last completed cycle means the
+        // descriptor describes THIS transition; anything else (interceptor
+        // substitutions, IME commits, WT batches) distrusts the fast paths.
+        let singleTrackedEdit = pendingEditCount == 1
+        pendingEditCount = 0
         let lengthDelta = previousDisplayLength >= 0 ? fullLength - previousDisplayLength : Int.min
         previousDisplayLength = fullLength
 
@@ -185,11 +190,18 @@ extension NativeTextViewCoordinator {
             nextParagraph
         ] + editedParagraphs
 
-        let backtickCount = PerfTrace.measure("backtick") { MarkdownDetection.tripleBacktickCount(in: fullText) }
+        let backtickCount = PerfTrace.measure("backtick") {
+            incrementalBacktickCensus(fullText: fullText, editedRange: editedRange,
+                                      lengthDelta: lengthDelta, trusted: singleTrackedEdit)
+        }
         let codeBlockStructureChanged = backtickCount != previousBacktickCount
         previousBacktickCount = backtickCount
 
-        let parsed = PerfTrace.measure("parse") { parsedDocument(for: docString) }
+        let parsed = PerfTrace.measure("parse") {
+            parsedDocument(for: docString, edit: singleTrackedEdit
+                ? ParseEditDescriptor(editedRange: editedRange, delta: lengthDelta)
+                : nil)
+        }
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
@@ -232,6 +244,9 @@ extension NativeTextViewCoordinator {
             .filter { $0.kind == .table && NSIntersectionRange($0.range, safeEditedRange).length > 0 }
             .map { fullText.paragraphRange(for: $0.range) }
         effectiveParagraphCandidates.append(contentsOf: editedTableParagraphs)
+        if !editedTableParagraphs.isEmpty {
+            PerfTrace.note { "📐 TABLE-RESTYLE blocks=\(editedTableParagraphs.map { "\($0.location)+\($0.length)" }.joined(separator: ",")) editedRange=\(safeEditedRange.location),\(safeEditedRange.length)" }
+        }
         effectiveParagraphCandidates.append(contentsOf: tokenRestyleParagraphs(
             in: fullText,
             tokens: tokens,
@@ -276,7 +291,16 @@ extension NativeTextViewCoordinator {
         updateSelectionStates(tv)
         let selLoc = selRange.location
 
-        let parsed = parsedDocument(for: tv.string)
+        // Selection change fires BEFORE textDidChange mid-edit: hand the
+        // pending descriptor through so this (the keystroke's first post-edit
+        // parse) splices in O(edit) instead of scanning the whole document.
+        let selectionEdit: ParseEditDescriptor? = {
+            guard let pending = pendingEditedRange, pendingEditCount == 1,
+                  previousDisplayLength >= 0 else { return nil }
+            let delta = (tv.string as NSString).length - previousDisplayLength
+            return ParseEditDescriptor(editedRange: pending, delta: delta)
+        }()
+        let parsed = parsedDocument(for: tv.string, edit: selectionEdit)
         let tokens = parsed.tokens
         let codeTokens = parsed.codeTokens
         let latexTokens = parsed.latexTokens
@@ -495,6 +519,37 @@ extension NativeTextViewCoordinator {
         }
     }
 
+    /// Backtick census in O(edit window): the greedy ``` count equals
+    /// Σ floor(runLen/3) over maximal backtick runs, so an edit only changes
+    /// the contribution of runs it touches. `previousBacktickCount` minus the
+    /// pre-edit window count (captured in shouldChangeTextIn) plus the
+    /// post-edit window count is exact. Any doubt → full scan.
+    private func incrementalBacktickCensus(fullText: NSString, editedRange: NSRange,
+                                           lengthDelta: Int, trusted: Bool) -> Int {
+        defer { pendingBacktickWindow = nil }
+        guard trusted, !backtickCensusNeedsRescan,
+              let base = pendingBacktickWindow,
+              lengthDelta != Int.min,
+              base.location == editedRange.location,
+              editedRange.length - lengthDelta == base.oldLength,
+              editedRange.location >= 0,
+              NSMaxRange(editedRange) <= fullText.length
+        else {
+            backtickCensusNeedsRescan = false
+            return MarkdownDetection.tripleBacktickCount(in: fullText)
+        }
+        let newWindow = MarkdownDetection.backtickWindowCount(in: fullText, around: editedRange)
+        let count = previousBacktickCount - base.oldCount + newWindow
+#if DEBUG
+        backtickVerifyCounter &+= 1
+        if backtickVerifyCounter % 64 == 0 {
+            assert(count == MarkdownDetection.tripleBacktickCount(in: fullText),
+                   "incremental backtick census diverged from the full scan")
+        }
+#endif
+        return count
+    }
+
     public func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
         parseGeneration &+= 1
         // Refresh the descriptor for EVERY proposed edit — including programmatic
@@ -503,6 +558,15 @@ extension NativeTextViewCoordinator {
         // would otherwise leave the suppressed edit's descriptor behind, and the
         // wiki splice in textDidChange would corrupt the storage form from it.
         pendingEditedRange = NSRange(location: affectedCharRange.location, length: replacementString?.utf16.count ?? 0)
+        pendingEditCount += 1
+        // Pre-edit backtick window baseline for the incremental census.
+        let preNS = textView.string as NSString
+        if affectedCharRange.location >= 0, NSMaxRange(affectedCharRange) <= preNS.length {
+            pendingBacktickWindow = (affectedCharRange.location, affectedCharRange.length,
+                MarkdownDetection.backtickWindowCount(in: preNS, around: affectedCharRange))
+        } else {
+            pendingBacktickWindow = nil
+        }
         if isProgrammaticEdit { return true }
         if isWritingToolsActive { return true }
         // Raw mode: plain-text editing — no smart Markdown input.

@@ -49,19 +49,32 @@ extension MarkdownStyler {
                       c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent)
     }
 
-    /// Returns the rendered image for `source`, from cache when possible.
-    /// `rendered` is true only when a fresh render actually happened.
-    static func tableImage(
-        for source: String,
-        parsed: ParsedTable,
-        ctx: StylingContext,
-        appearance: NSAppearance
-    ) -> (image: NSImage, rendered: Bool) {
+    /// Resolving six colors per table per keystroke is measurable (10 tables ×
+    /// 6 appearance-scoped resolutions). The resolved prefix depends only on
+    /// the color INSTANCES + appearance + font, so memoize it by identity —
+    /// theme copies keep the same NSColor references across keystrokes.
+    private static let themeKeyLock = NSLock()
+    private static var themeKeyCache: [String: String] = [:]
+
+    private static func themeKeyPrefix(ctx: StylingContext, appearance: NSAppearance) -> String {
+        let theme = ctx.configuration.theme
+        let identity = "\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|\(appearance.name.rawValue)|"
+            + "\(ObjectIdentifier(theme.bodyText))|\(ObjectIdentifier(theme.mutedText))|"
+            + "\(ObjectIdentifier(theme.highlightColor))|\(ObjectIdentifier(ctx.codeBackgroundColor))|"
+            + "\(ObjectIdentifier(theme.latexLightModeText))|\(ObjectIdentifier(theme.latexDarkModeText))|"
+            + "\(ObjectIdentifier(type(of: ctx.services.latex)))"
+
+        themeKeyLock.lock()
+        if let cached = themeKeyCache[identity] {
+            themeKeyLock.unlock()
+            return cached
+        }
+        themeKeyLock.unlock()
+
         // Every input renderTable reads must be in the key: fonts, all theme
         // colors it draws with, and the latex renderer (by type — a NoOp and a
         // real renderer must not share entries).
-        let theme = ctx.configuration.theme
-        let key = [
+        let prefix = [
             ctx.baseFont.fontName,
             "\(ctx.baseFont.pointSize)",
             appearance.name.rawValue,
@@ -72,8 +85,24 @@ extension MarkdownStyler {
             colorKey(theme.latexLightModeText, under: appearance),
             colorKey(theme.latexDarkModeText, under: appearance),
             "\(ObjectIdentifier(type(of: ctx.services.latex)))",
-            source,
-        ].joined(separator: "|") as NSString
+        ].joined(separator: "|")
+
+        themeKeyLock.lock()
+        if themeKeyCache.count > 32 { themeKeyCache.removeAll() }
+        themeKeyCache[identity] = prefix
+        themeKeyLock.unlock()
+        return prefix
+    }
+
+    /// Returns the rendered image for `source`, from cache when possible.
+    /// `rendered` is true only when a fresh render actually happened.
+    static func tableImage(
+        for source: String,
+        parsed: ParsedTable,
+        ctx: StylingContext,
+        appearance: NSAppearance
+    ) -> (image: NSImage, rendered: Bool) {
+        let key = (themeKeyPrefix(ctx: ctx, appearance: appearance) + "|" + source) as NSString
         if let cached = tableImageCache.object(forKey: key) {
             return (cached, false)
         }
@@ -95,6 +124,7 @@ extension MarkdownStyler {
         var occurrenceByContentHash: [Int: Int] = [:]
         var tableCount = 0
         var renderedCount = 0
+        var tableTrace: [String] = []   // per-table: loc/state/height (Debug diagnosis)
         let tablesT0 = DispatchTime.now().uptimeNanoseconds
         for (idx, token) in ctx.tokens.enumerated() where token.kind == .table {
             tableCount += 1
@@ -111,6 +141,7 @@ extension MarkdownStyler {
 
             let isActive = ctx.activeTokenIndices.contains(idx)
             if isActive {
+                tableTrace.append("@\(token.range.location):ACTIVE-RAW")
                 // Caret inside the table — show editable source, pipes muted like other syntax.
                 let muted = ctx.configuration.theme.mutedText
                 let body = ctx.configuration.theme.bodyText
@@ -137,6 +168,7 @@ extension MarkdownStyler {
                 appearance: renderAppearance
             )
             if rendered { renderedCount += 1 }
+            tableTrace.append("@\(token.range.location):img h=\(Int(image.size.height))\(rendered ? " FRESH" : "")")
             let imageBounds = CGRect(x: 0, y: 0, width: image.size.width, height: image.size.height)
             // Wide tables → scrollable mode (NSScrollView overlay); narrow → collapsed.
             let containerWidth = effectiveContainerWidth(for: ctx)
@@ -167,7 +199,7 @@ extension MarkdownStyler {
         }
         if tableCount > 0 {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - tablesT0) / 1_000_000
-            PerfTrace.note { "styleTables scanned=\(tableCount) tables, re-rendered=\(renderedCount) NSImage in \(String(format: "%.2f", ms))ms" }
+            PerfTrace.note { "styleTables scanned=\(tableCount) tables, re-rendered=\(renderedCount) NSImage in \(String(format: "%.2f", ms))ms | \(tableTrace.joined(separator: " "))" }
         }
         return attrs
     }

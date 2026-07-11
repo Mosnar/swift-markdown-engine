@@ -41,6 +41,13 @@ extension NativeTextViewCoordinator {
         lastComputedStorage = text
         previousDisplayLength = (displayText as NSString).length
         let nsDisplay = displayText as NSString
+        // Fresh document baseline: drop the incremental parse state and reseed
+        // the backtick census (a stale count from the previous document would
+        // force a spurious full-document restyle on the first keystroke).
+        parseState.invalidate()
+        pendingBacktickWindow = nil
+        backtickCensusNeedsRescan = false
+        previousBacktickCount = MarkdownDetection.tripleBacktickCount(in: nsDisplay)
         let fullRange = NSRange(location: 0, length: nsDisplay.length)
 
         let (baseFont, paragraph) = TextStylingService.makeBaseFontAndStyle(
@@ -152,22 +159,28 @@ extension NativeTextViewCoordinator {
         }
     }
 
-    func parsedDocument(for text: String) -> ParsedDocument {
+    func parsedDocument(for text: String, edit: ParseEditDescriptor? = nil) -> ParsedDocument {
+        let t0 = DispatchTime.now().uptimeNanoseconds
         let length = (text as NSString).length
         if let cachedParsedDocument, cachedParsedLength == length {
             // O(1) hit: nothing has edited the storage since the cached parse.
             if cachedParseGeneration == parseGeneration {
+                PerfTrace.note { "📊 parsedDoc GEN-HIT" }
                 return cachedParsedDocument
             }
             // Generation moved but the text may still be identical (e.g. an
             // attribute-only pass): verify once, then it's O(1) again.
-            if let cachedParsedText, cachedParsedText == text {
+            // NSString.isEqual is a byte compare; the bridged Swift `==` walked
+            // the 139k text character-wise at ~6ms per keystroke.
+            if let cachedParsedText, (cachedParsedText as NSString).isEqual(to: text) {
                 cachedParseGeneration = parseGeneration
+                PerfTrace.note { "📊 parsedDoc VERIFY-HIT \(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
                 return cachedParsedDocument
             }
         }
 
-        let tokens = MarkdownTokenizer.parseTokensViaAST(in: text)
+        let tokens = parseState.tokens(for: text, edit: edit)
+        PerfTrace.note { "📊 parsedDoc MISS edit=\(edit != nil) stateTokens=\(String(format: "%.2f", Double(DispatchTime.now().uptimeNanoseconds - t0) / 1_000_000))ms" }
         var codeTokens: [MarkdownToken] = []
         var latexTokens: [MarkdownToken] = []
         var blockLatexTokens: [MarkdownToken] = []

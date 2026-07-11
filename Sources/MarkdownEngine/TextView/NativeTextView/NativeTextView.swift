@@ -94,6 +94,8 @@ final class NativeTextView: NSTextView {
         // current generation — bump so the restyle below reparses instead of
         // serving that stale document (same-length composition updates).
         coord.parseGeneration &+= 1
+        // Census bookkeeping never saw this mutation → next census full-scans.
+        coord.backtickCensusNeedsRescan = true
         let nsText = self.string as NSString
         let paragraph = nsText.paragraphRange(for: marked)
         coord.restyleParagraphs([paragraph], in: self)
