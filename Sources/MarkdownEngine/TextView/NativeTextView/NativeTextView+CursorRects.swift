@@ -62,7 +62,7 @@ extension NativeTextView {
     private func applyCursor(at viewPoint: CGPoint, modifiers: NSEvent.ModifierFlags) {
         guard isSelectable else { return }
         guard let hit = linkHit(at: viewPoint) else {
-            if !isEditable { NSCursor.arrow.set() }
+            (isEditable ? NSCursor.iBeam : NSCursor.arrow).set()
             return
         }
         if !isEditable {
