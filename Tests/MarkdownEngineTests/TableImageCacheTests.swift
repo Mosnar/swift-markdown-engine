@@ -13,7 +13,10 @@ import Testing
 @Suite("Table image cache")
 struct TableImageCacheTests {
 
-    private func makeContext(for source: String) -> MarkdownStyler.StylingContext {
+    private func makeContext(
+        for source: String,
+        configuration: MarkdownEditorConfiguration = .default
+    ) -> MarkdownStyler.StylingContext {
         let font = NSFont.systemFont(ofSize: 15)
         return MarkdownStyler.StylingContext(
             nsText: source as NSString,
@@ -25,7 +28,7 @@ struct TableImageCacheTests {
             baseDefaultLineHeight: 18,
             codeBackgroundColor: .windowBackgroundColor,
             latexMarkerFont: font,
-            configuration: .default,
+            configuration: configuration,
             wikiLinkIDProvider: { _ in nil }
         )
     }
@@ -55,5 +58,48 @@ struct TableImageCacheTests {
         let darkResult = MarkdownStyler.tableImage(for: source, parsed: parsed, ctx: ctx, appearance: dark)
 
         #expect(darkResult.rendered)
+    }
+
+    // The key must cover every color renderTable draws with — mutedText paints
+    // the border and header fill, so a theme differing only there is a miss.
+    @Test func mutedTextChangeRendersFresh() throws {
+        let source = "| epsilon | zeta |\n|---|---|\n| 7 | 8 |"
+        let parsed = try #require(MarkdownStyler.parseTableSource(source))
+        let aqua = try #require(NSAppearance(named: .aqua))
+
+        var themed = MarkdownEditorConfiguration.default
+        themed.theme.mutedText = .systemPink
+
+        _ = MarkdownStyler.tableImage(for: source, parsed: parsed, ctx: makeContext(for: source), appearance: aqua)
+        let repainted = MarkdownStyler.tableImage(
+            for: source, parsed: parsed,
+            ctx: makeContext(for: source, configuration: themed), appearance: aqua
+        )
+
+        #expect(repainted.rendered)
+    }
+
+    // NSColor descriptions are not identities: two named dynamic colors sharing
+    // a name describe identically. The key must use resolved components instead.
+    @Test func sameNamedDynamicColorsDoNotCollide() throws {
+        let source = "| eta | theta |\n|---|---|\n| 9 | 10 |"
+        let parsed = try #require(MarkdownStyler.parseTableSource(source))
+        let aqua = try #require(NSAppearance(named: .aqua))
+
+        var blueBody = MarkdownEditorConfiguration.default
+        blueBody.theme.bodyText = NSColor(name: "body") { _ in .systemBlue }
+        var redBody = MarkdownEditorConfiguration.default
+        redBody.theme.bodyText = NSColor(name: "body") { _ in .systemRed }
+
+        _ = MarkdownStyler.tableImage(
+            for: source, parsed: parsed,
+            ctx: makeContext(for: source, configuration: blueBody), appearance: aqua
+        )
+        let redRender = MarkdownStyler.tableImage(
+            for: source, parsed: parsed,
+            ctx: makeContext(for: source, configuration: redBody), appearance: aqua
+        )
+
+        #expect(redRender.rendered)
     }
 }

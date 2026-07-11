@@ -497,11 +497,16 @@ extension NativeTextViewCoordinator {
 
     public func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
         parseGeneration &+= 1
+        // Refresh the descriptor for EVERY proposed edit — including programmatic
+        // ones. A smart-input interceptor that suppresses a keystroke and performs
+        // a different edit (auto-pair, "->"→"→", Tab indent, list-exit, $$-wrap)
+        // would otherwise leave the suppressed edit's descriptor behind, and the
+        // wiki splice in textDidChange would corrupt the storage form from it.
+        pendingEditedRange = NSRange(location: affectedCharRange.location, length: replacementString?.utf16.count ?? 0)
         if isProgrammaticEdit { return true }
         if isWritingToolsActive { return true }
         // Raw mode: plain-text editing — no smart Markdown input.
         if configuration.rawSourceMode { return true }
-        pendingEditedRange = NSRange(location: affectedCharRange.location, length: replacementString?.utf16.count ?? 0)
         let currentLen = (textView.string as NSString).length
         let maxR = affectedCharRange.location + affectedCharRange.length
         if affectedCharRange.location > currentLen || maxR > currentLen {

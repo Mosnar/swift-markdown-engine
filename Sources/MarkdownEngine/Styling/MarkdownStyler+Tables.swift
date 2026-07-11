@@ -34,6 +34,21 @@ extension MarkdownStyler {
         return cache
     }()
 
+    /// Pixel-level fingerprint of a theme color: its sRGB components resolved
+    /// under `appearance`. NSColor descriptions are not sound identities —
+    /// named dynamic colors describe by name only (two providers collide),
+    /// unnamed ones by per-instance UUID (never hit) — so key on what actually
+    /// reaches the bitmap.
+    private static func colorKey(_ color: NSColor, under appearance: NSAppearance) -> String {
+        var srgb: NSColor?
+        appearance.performAsCurrentDrawingAppearance {
+            srgb = color.usingColorSpace(.sRGB)
+        }
+        guard let c = srgb else { return "\(color)" }
+        return String(format: "%.4f,%.4f,%.4f,%.4f",
+                      c.redComponent, c.greenComponent, c.blueComponent, c.alphaComponent)
+    }
+
     /// Returns the rendered image for `source`, from cache when possible.
     /// `rendered` is true only when a fresh render actually happened.
     static func tableImage(
@@ -42,7 +57,23 @@ extension MarkdownStyler {
         ctx: StylingContext,
         appearance: NSAppearance
     ) -> (image: NSImage, rendered: Bool) {
-        let key = "\(ctx.baseFont.fontName)|\(ctx.baseFont.pointSize)|\(appearance.name.rawValue)|\(ctx.configuration.theme.bodyText)|\(ctx.codeBackgroundColor)|\(source)" as NSString
+        // Every input renderTable reads must be in the key: fonts, all theme
+        // colors it draws with, and the latex renderer (by type — a NoOp and a
+        // real renderer must not share entries).
+        let theme = ctx.configuration.theme
+        let key = [
+            ctx.baseFont.fontName,
+            "\(ctx.baseFont.pointSize)",
+            appearance.name.rawValue,
+            colorKey(theme.bodyText, under: appearance),
+            colorKey(theme.mutedText, under: appearance),
+            colorKey(theme.highlightColor, under: appearance),
+            colorKey(ctx.codeBackgroundColor, under: appearance),
+            colorKey(theme.latexLightModeText, under: appearance),
+            colorKey(theme.latexDarkModeText, under: appearance),
+            "\(ObjectIdentifier(type(of: ctx.services.latex)))",
+            source,
+        ].joined(separator: "|") as NSString
         if let cached = tableImageCache.object(forKey: key) {
             return (cached, false)
         }

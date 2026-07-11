@@ -89,6 +89,11 @@ final class NativeTextView: NSTextView {
               let coord = delegate as? NativeTextViewCoordinator else { return }
         let marked = markedRange()
         guard marked.location != NSNotFound, marked.length > 0 else { return }
+        // The composition mutated the storage without textDidChange, and
+        // shouldChangeTextIn's own parse re-cached the PRE-edit string at the
+        // current generation — bump so the restyle below reparses instead of
+        // serving that stale document (same-length composition updates).
+        coord.parseGeneration &+= 1
         let nsText = self.string as NSString
         let paragraph = nsText.paragraphRange(for: marked)
         coord.restyleParagraphs([paragraph], in: self)
