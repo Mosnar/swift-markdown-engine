@@ -69,6 +69,11 @@ enum MarkdownASTStyler {
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
         }
+        attrs += AutomaticLinkService.styledRanges(
+            in: text,
+            blocks: blocks,
+            provider: configuration.services.automaticLinks
+        )
         shrinkInactiveMarkers(in: blocks, ctx: ctx, into: &attrs)
 
         // Text/regex passes (AST-agnostic); AST code ranges drive the "skip inside code" checks.

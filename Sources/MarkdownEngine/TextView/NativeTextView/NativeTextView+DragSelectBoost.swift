@@ -19,6 +19,7 @@ extension NativeTextView {
             return
         }
         dragStartMouseScreenLoc = NSEvent.mouseLocation
+        activeMouseDownModifierFlags = event.modifierFlags
         let boostTimer = Timer(timeInterval: 1.0 / configuration.dragSelection.ticksPerSecond, repeats: true) { [weak self] _ in
             self?.performDragBoostTick()
         }
@@ -26,6 +27,7 @@ extension NativeTextView {
         defer {
             boostTimer.invalidate()
             dragStartMouseScreenLoc = nil
+            activeMouseDownModifierFlags = nil
         }
 
         super.mouseDown(with: event)

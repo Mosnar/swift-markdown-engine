@@ -15,6 +15,60 @@
 import AppKit
 import Foundation
 
+// MARK: - Automatic Links
+
+/// Finds host-defined links in otherwise plain Markdown text.
+///
+/// The engine calls providers only for AST-approved plain-text ranges, never
+/// for code, existing links, images, wiki links, or other opaque syntax.
+public protocol AutomaticLinkProvider: Sendable {
+    func matches(in text: String, range: NSRange) -> [AutomaticLinkMatch]
+    func fingerprint() -> AnyHashable
+}
+
+public extension AutomaticLinkProvider {
+    func fingerprint() -> AnyHashable { 0 }
+}
+
+public struct AutomaticLinkMatch: Sendable, Equatable {
+    public enum ActivationPolicy: Sendable, Equatable {
+        case standard
+        case commandClickWhenEditable
+    }
+
+    public let range: NSRange
+    public let target: String
+    public let activationPolicy: ActivationPolicy
+
+    public init(
+        range: NSRange,
+        target: String,
+        activationPolicy: ActivationPolicy = .standard
+    ) {
+        self.range = range
+        self.target = target
+        self.activationPolicy = activationPolicy
+    }
+}
+
+public struct NoOpAutomaticLinkProvider: AutomaticLinkProvider {
+    public init() {}
+    public func matches(in text: String, range: NSRange) -> [AutomaticLinkMatch] { [] }
+}
+
+/// Hover information for a host-defined automatic link.
+public struct LinkHoverState: Sendable, Equatable {
+    public let target: String
+    public let characterRange: NSRange
+    public let anchorRect: CGRect
+
+    public init(target: String, characterRange: NSRange, anchorRect: CGRect) {
+        self.target = target
+        self.characterRange = characterRange
+        self.anchorRect = anchorRect
+    }
+}
+
 // MARK: - Wiki Links
 
 /// Resolves a wiki-link's display name to a stable storage identifier.
@@ -295,6 +349,7 @@ public struct MarkdownEditorBus: Sendable {
 /// dependencies exclusively from this container; embedders inject the
 /// implementations they want.
 public struct MarkdownEditorServices: Sendable {
+    public var automaticLinks: any AutomaticLinkProvider
     public var wikiLinks: any WikiLinkResolver
     public var images: any EmbeddedImageProvider
     public var syntaxHighlighter: any SyntaxHighlighter
@@ -302,12 +357,14 @@ public struct MarkdownEditorServices: Sendable {
     public var bus: MarkdownEditorBus
 
     public init(
+        automaticLinks: any AutomaticLinkProvider = NoOpAutomaticLinkProvider(),
         wikiLinks: any WikiLinkResolver = NoOpWikiLinkResolver(),
         images: any EmbeddedImageProvider = NoOpEmbeddedImageProvider(),
         syntaxHighlighter: any SyntaxHighlighter = PlainTextSyntaxHighlighter(),
         latex: any LatexRenderer = NoOpLatexRenderer(),
         bus: MarkdownEditorBus = .default
     ) {
+        self.automaticLinks = automaticLinks
         self.wikiLinks = wikiLinks
         self.images = images
         self.syntaxHighlighter = syntaxHighlighter

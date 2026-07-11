@@ -80,6 +80,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// resolved opaque identifier (or the display name when no resolver
     /// was supplied).
     public var onLinkClick: ((String) -> Void)?
+    /// Fires when the pointer enters, moves within, or leaves an automatic link.
+    /// The anchor rectangle is expressed in wrapper viewport coordinates.
+    public var onLinkHoverChange: ((LinkHoverState?) -> Void)?
     /// Fires whenever the caret rect inside an active wiki-link changes,
     /// so embedders can position a follow-the-caret UI.
     public var onCaretRectChange: ((CGRect) -> Void)?
@@ -136,6 +139,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         isEditable: Bool = true,
         onPasteImage: ((NSPasteboard) -> String?)? = nil,
         onLinkClick: ((String) -> Void)? = nil,
+        onLinkHoverChange: ((LinkHoverState?) -> Void)? = nil,
         onCaretRectChange: ((CGRect) -> Void)? = nil,
         onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)? = nil,
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
@@ -158,6 +162,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.isEditable = isEditable
         self.onPasteImage = onPasteImage
         self.onLinkClick = onLinkClick
+        self.onLinkHoverChange = onLinkHoverChange
         self.onCaretRectChange = onCaretRectChange
         self.onBuildContextMenu = onBuildContextMenu
         self.onInlineSelectionChange = onInlineSelectionChange
@@ -266,6 +271,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isAutomaticDataDetectionEnabled = true
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.onPasteImage = onPasteImage
+        textView.onLinkHoverChange = onLinkHoverChange
         if #available(macOS 15.1, *) {
             textView.writingToolsBehavior = .complete
         }
@@ -416,6 +422,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
 
         textView.onPasteImage = onPasteImage
+        textView.onLinkHoverChange = onLinkHoverChange
         textView.isCursorExcluded = isCursorExcluded
         textView.setPlaceholder(placeholder)
         // Sync heightBehavior across all three layers (scroll view, text view,
@@ -458,11 +465,14 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         // embedder is the source of truth.
         let newImageFingerprint = configuration.services.images.fingerprint()
         let newWikiFingerprint = configuration.services.wikiLinks.fingerprint()
+        let newAutomaticLinkFingerprint = configuration.services.automaticLinks.fingerprint()
         let imageChanged = newImageFingerprint != context.coordinator.lastImageFingerprint
         let wikiChanged = newWikiFingerprint != context.coordinator.lastWikiFingerprint
-        if imageChanged || wikiChanged {
+        let automaticLinksChanged = newAutomaticLinkFingerprint != context.coordinator.lastAutomaticLinkFingerprint
+        if imageChanged || wikiChanged || automaticLinksChanged {
             context.coordinator.lastImageFingerprint = newImageFingerprint
             context.coordinator.lastWikiFingerprint = newWikiFingerprint
+            context.coordinator.lastAutomaticLinkFingerprint = newAutomaticLinkFingerprint
             context.coordinator.configuration.services = configuration.services
             textView.configuration.services = configuration.services
             // Only an image change needs a layout re-measure; a wiki-link rename is style-only.
@@ -565,6 +575,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
 
         context.coordinator.onCaretRectChange = onCaretRectChange
+        context.coordinator.onLinkClick = onLinkClick
         context.coordinator.onBuildContextMenu = onBuildContextMenu
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
@@ -584,6 +595,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.configuration = configuration
         coordinator.lastImageFingerprint = configuration.services.images.fingerprint()
         coordinator.lastWikiFingerprint = configuration.services.wikiLinks.fingerprint()
+        coordinator.lastAutomaticLinkFingerprint = configuration.services.automaticLinks.fingerprint()
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         coordinator.userPrefersContinuousSpellChecking = configuration.spellChecking.continuousSpellChecking
         coordinator.userPrefersGrammarChecking = configuration.spellChecking.grammarChecking

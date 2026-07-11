@@ -27,6 +27,8 @@ checkboxes.
 - **Live Markdown styling** — bold, italic, strikethrough, highlight, headings, lists, blockquotes, GFM tables, code, links, task checkboxes, horizontal rules 
 - **Wiki-style linking** with two-form storage / display roundtripping
   (`[[Name|<id>]]` ↔ `[[Name]]`)
+- **Host-defined automatic links** in plain text, with scoped restyling,
+  Command-click activation for editable documents, and hover geometry
 - **Image embeds** — both `![[Name]]` (Obsidian-style, embedder supplies the                           
   bytes) and standard Markdown `![alt](url)`
 - **LaTeX** — both block (`$$ … $$`) and inline (`$…$`), embedder supplies
@@ -96,11 +98,12 @@ highlighting, themes, wiki-link state, and more.
 
 ### Service Protocols
 
-The engine talks to your app through four service protocols, each with
+The engine talks to your app through service protocols, each with
 a no-op default so you only implement what you actually need:
 
 | Protocol | What you supply | Ready-made bridge / suggested library |
 |---|---|---|
+| `AutomaticLinkProvider` | Recognize host-defined targets in plain text | (your data model) |
 | `WikiLinkResolver` | Resolve a `[[Name]]` to a stable opaque id | (your data model) |
 | `EmbeddedImageProvider` | Look up an `NSImage` for `![[Name]]` | (your asset store) |
 | `SyntaxHighlighter` | Highlight code blocks for a given language | **`HighlighterSwiftBridge`** ([recommended](#code-blocks)) — built on [HighlighterSwift](https://github.com/smittytone/HighlighterSwift) |

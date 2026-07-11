@@ -41,6 +41,9 @@ final class NativeTextView: NSTextView {
 
     // MARK: Editor wiring
     var onPasteImage: ((NSPasteboard) -> String?)?
+    var onLinkHoverChange: ((LinkHoverState?) -> Void)?
+    var lastLinkHoverState: LinkHoverState?
+    var activeMouseDownModifierFlags: NSEvent.ModifierFlags?
     weak var layoutBridge: LayoutBridge?
     var baseFont: NSFont = NSFont.systemFont(ofSize: NSFont.systemFontSize)
 

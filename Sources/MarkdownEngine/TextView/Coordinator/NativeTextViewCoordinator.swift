@@ -50,6 +50,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// returns the current value, regardless of when state changed.
     var lastImageFingerprint: AnyHashable?
     var lastWikiFingerprint: AnyHashable?
+    var lastAutomaticLinkFingerprint: AnyHashable?
     private var busObservers: [NSObjectProtocol] = []
     private var registeredAppearanceObserverName: Notification.Name?
     weak var textView: NSTextView?
@@ -361,4 +362,3 @@ extension NSTextView {
         return boundingRect
     }
 }
-

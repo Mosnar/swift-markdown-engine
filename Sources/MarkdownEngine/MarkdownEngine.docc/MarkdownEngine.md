@@ -41,6 +41,16 @@ The default ``MarkdownEditorConfiguration`` ships with no-op service
 implementations, so the editor renders plain Markdown out of the box. Add
 real services as you need them.
 
+### Automatic Links
+
+Inject an ``AutomaticLinkProvider`` through
+``MarkdownEditorServices/automaticLinks`` to recognize host-defined targets
+inside plain text. The engine excludes code and existing Markdown constructs,
+then owns the resulting TextKit attributes in its normal scoped restyle pass.
+Use ``AutomaticLinkMatch/ActivationPolicy/commandClickWhenEditable`` to keep
+ordinary clicks available for caret placement, and
+``NativeTextViewWrapper/onLinkHoverChange`` to drive preview UI.
+
 ### Customizing Appearance
 
 ```swift
@@ -79,6 +89,9 @@ configuration.services = services
 
 ### Service Protocols
 
+- ``AutomaticLinkProvider``
+- ``AutomaticLinkMatch``
+- ``LinkHoverState``
 - ``WikiLinkResolver``
 - ``EmbeddedImageProvider``
 - ``SyntaxHighlighter``
@@ -91,6 +104,7 @@ configuration.services = services
 
 ### Default No-Op Implementations
 
+- ``NoOpAutomaticLinkProvider``
 - ``NoOpWikiLinkResolver``
 - ``NoOpEmbeddedImageProvider``
 - ``PlainTextSyntaxHighlighter``
