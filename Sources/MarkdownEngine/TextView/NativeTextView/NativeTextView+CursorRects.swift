@@ -15,14 +15,12 @@ extension NativeTextView {
         if isInCursorExclusionZone(event) {
             NSCursor.arrow.set()
         } else {
-            super.mouseMoved(with: event)
             applyReadOnlyCursor(for: event)
         }
         updateAutomaticLinkHover(for: event)
     }
 
     override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
         if isInCursorExclusionZone(event) {
             NSCursor.arrow.set()
         } else {
@@ -32,9 +30,14 @@ extension NativeTextView {
     }
 
     override func mouseExited(with event: NSEvent) {
-        super.mouseExited(with: event)
         emitAutomaticLinkHover(nil)
     }
+
+    /// NSTextView installs its own link cursor rects from `.link` attributes.
+    /// Automatic editor links have a modifier-dependent cursor, so those static
+    /// rects would fight `mouseMoved`/`cursorUpdate` and visibly flicker. The
+    /// explicit tracking area owns cursor updates for the whole text view.
+    override func resetCursorRects() {}
 
     override func flagsChanged(with event: NSEvent) {
         super.flagsChanged(with: event)
