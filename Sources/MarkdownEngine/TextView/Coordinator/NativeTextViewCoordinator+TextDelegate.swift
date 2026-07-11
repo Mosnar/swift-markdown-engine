@@ -427,12 +427,26 @@ extension NativeTextViewCoordinator {
 
     public func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
         if let storage = textView.textStorage,
-           AutomaticLinkService.activationPolicy(in: storage, at: charIndex) == .commandClickWhenEditable,
-           textView.isEditable,
-           let mouseModifiers = (textView as? NativeTextView)?.activeMouseDownModifierFlags,
-           !mouseModifiers.contains(.command) {
-            textView.window?.makeFirstResponder(textView)
-            textView.setSelectedRange(NSRange(location: charIndex, length: 0))
+           let automaticPolicy = AutomaticLinkService.activationPolicy(in: storage, at: charIndex) {
+            if automaticPolicy == .commandClickWhenEditable,
+               textView.isEditable,
+               let mouseModifiers = (textView as? NativeTextView)?.activeMouseDownModifierFlags,
+               !mouseModifiers.contains(.command) {
+                textView.window?.makeFirstResponder(textView)
+                textView.setSelectedRange(NSRange(location: charIndex, length: 0))
+                return true
+            }
+            guard let target = storage.attribute(
+                AutomaticLinkService.targetAttribute,
+                at: charIndex,
+                effectiveRange: nil
+            ) as? String else {
+                return true
+            }
+            self.isWikiLinkActive = false
+            DispatchQueue.main.async {
+                self.onLinkClick?(target)
+            }
             return true
         }
         guard let target = WikiLinkService.resolveIdentifier(link: link, textView: textView, at: charIndex) else {

@@ -114,6 +114,45 @@ struct AutomaticLinkTests {
         #expect(clickedTargets.isEmpty)
     }
 
+    @Test("command-click routes the stored automatic target through the host callback")
+    @MainActor
+    func commandClickUsesAutomaticTarget() async {
+        await confirmation("host callback") { confirm in
+            var text = "bd-1"
+            var isWikiLinkActive = false
+            let coordinator = NativeTextViewCoordinator(
+                text: Binding(get: { text }, set: { text = $0 }),
+                fontName: "SF Pro",
+                fontSize: 16,
+                isWikiLinkActive: Binding(
+                    get: { isWikiLinkActive },
+                    set: { isWikiLinkActive = $0 }
+                ),
+                onLinkClick: { target in
+                    #expect(target == "beads://bead/bd-1")
+                    confirm()
+                },
+                onInlineSelectionChange: nil
+            )
+            let textView = NativeTextView(frame: CGRect(x: 0, y: 0, width: 200, height: 40))
+            textView.string = text
+            textView.isEditable = true
+            textView.textStorage?.addAttributes([
+                .link: URL(string: "beads://bead/ignored")!,
+                AutomaticLinkService.targetAttribute: "beads://bead/bd-1",
+                AutomaticLinkService.activationAttribute: 1
+            ], range: NSRange(location: 0, length: 4))
+            textView.activeMouseDownModifierFlags = .command
+
+            #expect(coordinator.textView(
+                textView,
+                clickedOnLink: URL(string: "beads://bead/ignored")!,
+                at: 2
+            ))
+            await Task.yield()
+        }
+    }
+
     @Test("native view installs automatic-link mouse tracking")
     @MainActor
     func installsMouseTracking() {
