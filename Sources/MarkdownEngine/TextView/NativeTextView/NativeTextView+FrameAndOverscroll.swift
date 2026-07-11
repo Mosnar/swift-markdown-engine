@@ -411,6 +411,12 @@ extension NativeTextView {
             walked += 1
             return fragment.layoutFragmentFrame.minY <= visBot
         }
-        PerfTrace.note { "ensureVisibleLayout walked=\(walked) frags from viewport" }
+        PerfTrace.note {
+            let vpStart = tlm.textViewportLayoutController.viewportRange
+                .map { tlm.offset(from: tlm.documentRange.location, to: $0.location) } ?? -1
+            let docH = String(format: "%.0f", self.frame.height)
+            let scrollY = String(format: "%.0f", self.visibleRect.minY)
+            return "ensureVisibleLayout walked=\(walked) frags | docH=\(docH) scrollY=\(scrollY) vpStart=\(vpStart)"
+        }
     }
 }
