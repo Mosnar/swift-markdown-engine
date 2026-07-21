@@ -6,7 +6,7 @@ import CoreText
 struct BulletMarkerGeometry {
     /// A small optical correction in the flipped drawing coordinate space.
     /// Exact ink centering reads slightly high beside system body text.
-    static let opticalOffsetY: CGFloat = 0.5
+    static let opticalOffsetY: CGFloat = 0.75
 
     let drawOrigin: CGPoint
     let renderedGlyphBounds: CGRect
