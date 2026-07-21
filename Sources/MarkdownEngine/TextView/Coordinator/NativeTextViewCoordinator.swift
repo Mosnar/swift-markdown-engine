@@ -187,6 +187,30 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         subscribeToAppearanceNotification()
     }
 
+    /// Refreshes the SwiftUI bindings captured by the long-lived coordinator.
+    /// `NSViewRepresentable` may reuse one coordinator while the embedder
+    /// supplies bindings for a different `documentId`.
+    func updateBindings(text: Binding<String>, isWikiLinkActive: Binding<Bool>) {
+        _text = text
+        _isWikiLinkActive = isWikiLinkActive
+    }
+
+    /// Defers a SwiftUI text write without allowing an outgoing document's
+    /// callback to land after the shared text view has switched documents.
+    func scheduleTextBindingUpdate(
+        _ storage: String,
+        forDocumentId expectedDocumentId: String?,
+        updatesLastSyncedText: Bool = true
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.documentId == expectedDocumentId else { return }
+            if updatesLastSyncedText {
+                self.lastSyncedText = storage
+            }
+            self.text = storage
+        }
+    }
+
     /// (Re)register the syntax-highlighter appearance observer; idempotent and unsubscribes on nil.
     private func subscribeToAppearanceNotification() {
         let target = configuration.services.syntaxHighlighter.appearanceDidChangeNotification

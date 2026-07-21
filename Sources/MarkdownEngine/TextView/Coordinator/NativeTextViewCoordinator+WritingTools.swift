@@ -67,9 +67,11 @@ extension NativeTextViewCoordinator {
         }
         // Don't pre-set `lastSyncedText` — leaving it stale lets updateNSView do its
         // normal rebuild (restyle + re-measure) so the accepted WT result stays visible.
-        DispatchQueue.main.async { [self] in
-            text = storage
-        }
+        scheduleTextBindingUpdate(
+            storage,
+            forDocumentId: documentId,
+            updatesLastSyncedText: false
+        )
     }
 
     // MARK: - Child window (Done/Original panel) position fix

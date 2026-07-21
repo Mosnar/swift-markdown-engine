@@ -374,6 +374,10 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
 
     public func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.nativeTextView else { return }
+        context.coordinator.updateBindings(
+            text: $text,
+            isWikiLinkActive: $isWikiLinkActive
+        )
         reconcileHeader(textView: textView, context: context)
 
         let isNodeSwitch = context.coordinator.documentId != documentId
@@ -505,7 +509,8 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         }
         if context.coordinator.didInitialFormatting
             && context.coordinator.lastSyncedText == text
-            && !fontChanged {
+            && !fontChanged
+            && !isNodeSwitch {
             return
         }
         if fontChanged {

@@ -526,12 +526,25 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
             let bullet = "•" as NSString
 
             let markerWidth = storageString.substring(with: attrRange).size(withAttributes: [.font: font]).width
-            let bulletWidth = bullet.size(withAttributes: bulletAttrs).width
-            let xOffset = max(0, (markerWidth - bulletWidth) / 2)
-            // Flipped context: text origin is its top edge, baseline sits one
-            // ascent below — so top = baseline − ascent aligns the glyph.
-            let topY = pos.baselineY - font.ascender
-            bullet.draw(at: CGPoint(x: pos.x + xOffset, y: topY), withAttributes: bulletAttrs)
+            let localIndex = attrRange.location - range.location
+            let fallbackLineBounds = CGRect(
+                x: pos.x,
+                y: pos.baselineY - font.ascender,
+                width: markerWidth,
+                height: max(1, font.ascender - font.descender)
+            )
+            let markerGeometry = BulletMarkerGeometry.make(
+                markerOriginX: pos.x,
+                markerWidth: markerWidth,
+                lineBounds: self.lineBounds(forLocalIndex: localIndex, point: point) ?? fallbackLineBounds,
+                font: font
+            )
+            let fallbackBulletWidth = bullet.size(withAttributes: bulletAttrs).width
+            let drawOrigin = markerGeometry?.drawOrigin ?? CGPoint(
+                x: pos.x + max(0, (markerWidth - fallbackBulletWidth) / 2),
+                y: pos.baselineY - font.ascender
+            )
+            bullet.draw(at: drawOrigin, withAttributes: bulletAttrs)
         }
     }
 

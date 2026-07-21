@@ -99,10 +99,10 @@ extension NativeTextViewCoordinator {
             )
             self.wikiLinkMetadata = storageState.metadata
             if storageState.storage != self.lastSyncedText {
-                DispatchQueue.main.async {
-                    self.lastSyncedText = storageState.storage
-                    self.text = storageState.storage
-                }
+                scheduleTextBindingUpdate(
+                    storageState.storage,
+                    forDocumentId: documentId
+                )
             }
         }
 
@@ -322,6 +322,7 @@ extension NativeTextViewCoordinator {
             guard case .imageEmbed = inlineContext else { return false }
             return true
         }()
+        let selectionDocumentId = documentId
         // Preview must only trigger inside the `![[…]]` content area
         let isInsideImageEmbedContent: Bool = {
             guard case .imageEmbed(let token) = inlineContext else { return false }
@@ -353,13 +354,15 @@ extension NativeTextViewCoordinator {
                     placeholder: placeholder
                 )
                 inlineSelectionState = InlineSelectionState(kind: inlineContext.selectionKind, selection: selection)
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.documentId == selectionDocumentId else { return }
                     self.onCaretRectChange?(previewRect)
                 }
             }
         }
 
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.documentId == selectionDocumentId else { return }
             self.isWikiLinkActive = inlineSelectionState?.kind == .wikiLink
             self.isImageEmbedActive = isInsideImageEmbed
             self.onInlineSelectionChange?(inlineSelectionState)
