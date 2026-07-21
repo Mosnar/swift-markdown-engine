@@ -4,7 +4,7 @@ import Testing
 
 @MainActor
 struct BulletMarkerGeometryTests {
-    @Test("Bullet ink is vertically centered in the TextKit line fragment", arguments: [
+    @Test("Bullet ink applies its optical offset from the line center", arguments: [
         (CGFloat(13), CGFloat(18), false),
         (CGFloat(16), CGFloat(24), false),
         (CGFloat(22), CGFloat(32), true),
@@ -21,7 +21,8 @@ struct BulletMarkerGeometryTests {
             font: font
         ))
 
-        #expect(abs(geometry.renderedGlyphBounds.midY - lineBounds.midY) < 0.001)
+        let expectedMidY = lineBounds.midY + BulletMarkerGeometry.opticalOffsetY
+        #expect(abs(geometry.renderedGlyphBounds.midY - expectedMidY) < 0.001)
     }
 
     @Test("Bullet origin stays within the source marker advance")

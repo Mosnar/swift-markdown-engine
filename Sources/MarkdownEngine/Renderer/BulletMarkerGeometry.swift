@@ -4,6 +4,10 @@ import CoreText
 /// Geometry for drawing a replacement bullet with its ink centered in the
 /// actual TextKit line fragment while retaining the source marker's advance.
 struct BulletMarkerGeometry {
+    /// A small optical correction in the flipped drawing coordinate space.
+    /// Exact ink centering reads slightly high beside system body text.
+    static let opticalOffsetY: CGFloat = 0.5
+
     let drawOrigin: CGPoint
     let renderedGlyphBounds: CGRect
 
@@ -29,7 +33,7 @@ struct BulletMarkerGeometry {
 
         let drawOrigin = CGPoint(
             x: markerOriginX + max(0, (markerWidth - advance.width) / 2),
-            y: lineBounds.midY + glyphBounds.midY - font.ascender
+            y: lineBounds.midY + glyphBounds.midY - font.ascender + opticalOffsetY
         )
         let baselineY = drawOrigin.y + font.ascender
         let renderedGlyphBounds = CGRect(
