@@ -28,6 +28,11 @@ extension NativeTextViewCoordinator {
     /// DISPLAY coordinates, so highlights land correctly even where the displayed text differs
     /// from the source (node links rendered shorter than `[[Name|UUID]]`, LaTeX, images). Posts
     /// the match count back via `bus.findResults` so the host can show "x of y".
+    /// Hosts that show several documents at once (one per field, say) pass
+    /// `focusDocumentId` to name the one that owns the focused match. Every
+    /// other document still highlights all of its matches, just without a
+    /// focused one, and none of them scroll: a multi-document host owns the
+    /// enclosing scroll view, so it does the scrolling from `matchRect`.
     @objc func handleFindQuery(_ notification: Notification) {
         guard let tv = textView,
               let info = notification.userInfo,
@@ -35,9 +40,30 @@ extension NativeTextViewCoordinator {
         let requestedIndex = info["currentIndex"] as? Int ?? 0
 
         let allRanges = findMatches(of: query, in: tv.string as NSString)
-        let currentIndex = allRanges.isEmpty ? 0 : min(max(requestedIndex, 0), allRanges.count - 1)
-        renderFindMatches(allRanges, currentIndex: currentIndex)
-        postFindResults(count: allRanges.count)
+
+        let focusDocumentId = info["focusDocumentId"] as? String
+        let hostDrivenFocus = focusDocumentId != nil
+        let ownsFocus = !hostDrivenFocus || focusDocumentId == documentId
+
+        let currentIndex: Int? = {
+            guard ownsFocus, !allRanges.isEmpty else { return nil }
+            return min(max(requestedIndex, 0), allRanges.count - 1)
+        }()
+
+        renderFindMatches(
+            allRanges,
+            currentIndex: currentIndex,
+            scrollsToCurrentMatch: !hostDrivenFocus
+        )
+
+        var matchRect: CGRect?
+        if hostDrivenFocus, let currentIndex, allRanges.indices.contains(currentIndex) {
+            matchRect = tv.wrapperAnchorRect(
+                forCharacterRange: allRanges[currentIndex],
+                using: layoutBridge
+            )
+        }
+        postFindResults(count: allRanges.count, query: query, matchRect: matchRect)
     }
 
     /// All ranges of `query` in `haystack` (display coordinates), case- and
@@ -57,10 +83,25 @@ extension NativeTextViewCoordinator {
         return ranges
     }
 
-    private func postFindResults(count: Int) {
-        if let resultsName = configuration.services.bus.findResults {
-            NotificationCenter.default.post(name: resultsName, object: nil, userInfo: ["count": count])
+    /// - Parameters:
+    ///   - query: echoed so a multi-document host can drop replies for a query
+    ///     the user has already moved on from. Replies are delivered a
+    ///     main-queue hop later, so stale ones do arrive.
+    ///   - matchRect: the focused match in the wrapper's top-leading coordinate
+    ///     space, for hosts that scroll the match into view themselves.
+    private func postFindResults(count: Int, query: String? = nil, matchRect: CGRect? = nil) {
+        guard let resultsName = configuration.services.bus.findResults else { return }
+        var info: [AnyHashable: Any] = ["count": count]
+        if let documentId {
+            info["documentId"] = documentId
         }
+        if let query {
+            info["query"] = query
+        }
+        if let matchRect {
+            info["matchRect"] = matchRect
+        }
+        NotificationCenter.default.post(name: resultsName, object: nil, userInfo: info)
     }
 
     /// Replace the current find match with the replacement string (one undo
@@ -73,7 +114,7 @@ extension NativeTextViewCoordinator {
         let requestedIndex = info["currentIndex"] as? Int ?? 0
 
         let matches = findMatches(of: query, in: tv.string as NSString)
-        guard !matches.isEmpty else { postFindResults(count: 0); return }
+        guard !matches.isEmpty else { postFindResults(count: 0, query: query); return }
         let idx = min(max(requestedIndex, 0), matches.count - 1)
         let target = matches[idx]
         guard NSMaxRange(target) <= (tv.string as NSString).length else { return }
@@ -92,7 +133,7 @@ extension NativeTextViewCoordinator {
         let updated = findMatches(of: query, in: tv.string as NSString)
         let nextIndex = updated.isEmpty ? 0 : min(idx, updated.count - 1)
         renderFindMatches(updated, currentIndex: nextIndex)
-        postFindResults(count: updated.count)
+        postFindResults(count: updated.count, query: query)
     }
 
     /// Replace every find match in a single undo step, then re-highlight.
@@ -103,7 +144,7 @@ extension NativeTextViewCoordinator {
               let replacement = info["replacement"] as? String else { return }
 
         let matches = findMatches(of: query, in: tv.string as NSString)
-        guard !matches.isEmpty else { postFindResults(count: 0); return }
+        guard !matches.isEmpty else { postFindResults(count: 0, query: query); return }
 
         // Group as one undo; edit back-to-front so earlier ranges stay valid.
         let orderedRanges = matches.reversed().map { NSValue(range: $0) }
@@ -125,11 +166,21 @@ extension NativeTextViewCoordinator {
         // Usually zero remain; non-zero only if the replacement contains the query.
         let remaining = findMatches(of: query, in: tv.string as NSString)
         renderFindMatches(remaining, currentIndex: 0)
-        postFindResults(count: remaining.count)
+        postFindResults(count: remaining.count, query: query)
     }
 
     /// Highlight all matches (current one stronger) and scroll the current match into view.
-    private func renderFindMatches(_ allRanges: [NSRange], currentIndex: Int) {
+    ///
+    /// - Parameters:
+    ///   - currentIndex: the focused match, or `nil` to highlight every match
+    ///     without focusing any — what a document holds when a sibling document
+    ///     owns the focus.
+    ///   - scrollsToCurrentMatch: pass `false` when the host scrolls instead.
+    private func renderFindMatches(
+        _ allRanges: [NSRange],
+        currentIndex: Int?,
+        scrollsToCurrentMatch: Bool = true
+    ) {
         guard let tv = textView else { return }
         let storage = tv.textStorage
         let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
@@ -154,7 +205,9 @@ extension NativeTextViewCoordinator {
         }
 
         // Scroll the current match into view.
-        guard allRanges.indices.contains(currentIndex) else { return }
+        guard scrollsToCurrentMatch,
+              let currentIndex,
+              allRanges.indices.contains(currentIndex) else { return }
         let range = allRanges[currentIndex]
         guard range.location + range.length <= fullRange.length else { return }
         // Scroll via TextKit 2 fragment layout, which works whether or not the

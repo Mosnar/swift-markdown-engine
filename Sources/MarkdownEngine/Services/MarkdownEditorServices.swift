@@ -297,9 +297,23 @@ public struct MarkdownEditorBus: Sendable {
     /// displayed text differs from the source (e.g. node links rendered shorter than
     /// `[[Name|UUID]]`, LaTeX, images). Preferred over `findScrollToRange`, which trusts
     /// host-computed (source-coordinate) ranges.
+    ///
+    /// Multi-document hosts — several editors on screen at once, each with its
+    /// own `documentId` — may also pass `userInfo["focusDocumentId"] as? String`
+    /// to name the document that owns the focused match. Documents whose id
+    /// doesn't match still highlight all of their matches, but without a focused
+    /// one, and no document scrolls itself: such a host owns the enclosing
+    /// scroll view, so it scrolls using the `matchRect` from `findResults`.
     public var findQuery: Notification.Name?
     /// Posted by the engine in response to `findQuery` with `userInfo["count"] as? Int`
     /// (number of matches in the displayed text), so the host can show "x of y".
+    ///
+    /// Also carries `userInfo["documentId"] as? String` (which document replied)
+    /// and `userInfo["query"] as? String` — the query it matched, echoed because
+    /// replies are delivered a main-queue hop later, so a reply for a superseded
+    /// query can still arrive. When the host supplied `focusDocumentId` and this
+    /// document owns the focused match, `userInfo["matchRect"] as? CGRect` is
+    /// that match's rect in the wrapper's top-leading coordinate space.
     public var findResults: Notification.Name?
     /// Posted by the host UI to replace the current find match. Expected
     /// `userInfo["query"] as? String`, `userInfo["replacement"] as? String`,
