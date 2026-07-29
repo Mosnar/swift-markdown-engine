@@ -56,7 +56,9 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
     /// and block images drawn below text via paragraphSpacing.
     override var renderingSurfaceBounds: CGRect {
         var bounds = super.renderingSurfaceBounds
-        if hasCodeBlockBackground || hasThematicBreak || hasBlockquote {
+        // Task checkboxes too: the box draws left of the first glyph (marker
+        // slot), outside the default text surface — TextKit would clip it.
+        if hasCodeBlockBackground || hasThematicBreak || hasBlockquote || hasTaskCheckbox {
             let containerWidth = textLayoutManager?.textContainer?.size.width ?? bounds.width
             // Extend left to container edge
             bounds.origin.x = -layoutFragmentFrame.origin.x
@@ -178,6 +180,18 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
         var found = false
         ts.enumerateAttribute(.blockquoteLevel, in: range, options: []) { value, _, stop in
             if value is Int {
+                found = true
+                stop.pointee = true
+            }
+        }
+        return found
+    }
+
+    private var hasTaskCheckbox: Bool {
+        guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return false }
+        var found = false
+        ts.enumerateAttribute(.taskCheckbox, in: range, options: []) { value, _, stop in
+            if value is Bool {
                 found = true
                 stop.pointee = true
             }
@@ -516,35 +530,51 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
         ts.enumerateAttribute(.bulletMarker, in: range, options: []) { [weak self] value, attrRange, _ in
             guard let self, (value as? Bool) == true else { return }
-            // Leave a selected marker alone so the highlighted raw char shows.
-            if selectionRanges.contains(where: { NSIntersectionRange($0, attrRange).length > 0 }) { return }
             guard let pos = self.drawPosition(forDocumentCharAt: attrRange.location, point: point) else { return }
 
             let font = (ts.attribute(.font, at: attrRange.location, effectiveRange: nil) as? NSFont)
                 ?? (self.textLayoutManager?.textContainer?.textView?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize))
-            let bulletAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: theme.bodyText]
-            let bullet = "•" as NSString
+            // A `.bulletMarker` range means the styler painted the raw char
+            // `.clear`, so something must ALWAYS be drawn over the slot. Outside
+            // a selection that's the rendered `•`; while the marker sits inside
+            // a selection the raw source char (`-`/`*`/`+`) is painted instead,
+            // so selecting a list line reveals its raw syntax. (The styler's own
+            // reveal is caret-based and doesn't fire for selections — an earlier
+            // selection-skip here drew nothing over the cleared char, which left
+            // an empty slot wherever the selection anchor wasn't in the marker.)
+            let isSelected = selectionRanges.contains(where: { NSIntersectionRange($0, attrRange).length > 0 })
+            let raw = storageString.substring(with: attrRange)
+            let glyph = (isSelected ? raw : "•") as NSString
+            let glyphAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: theme.bodyText]
 
-            let markerWidth = storageString.substring(with: attrRange).size(withAttributes: [.font: font]).width
-            let localIndex = attrRange.location - range.location
-            let fallbackLineBounds = CGRect(
-                x: pos.x,
-                y: pos.baselineY - font.ascender,
-                width: markerWidth,
-                height: max(1, font.ascender - font.descender)
-            )
-            let markerGeometry = BulletMarkerGeometry.make(
-                markerOriginX: pos.x,
-                markerWidth: markerWidth,
-                lineBounds: self.lineBounds(forLocalIndex: localIndex, point: point) ?? fallbackLineBounds,
-                font: font
-            )
-            let fallbackBulletWidth = bullet.size(withAttributes: bulletAttrs).width
-            let drawOrigin = markerGeometry?.drawOrigin ?? CGPoint(
-                x: pos.x + max(0, (markerWidth - fallbackBulletWidth) / 2),
-                y: pos.baselineY - font.ascender
-            )
-            bullet.draw(at: drawOrigin, withAttributes: bulletAttrs)
+            let markerWidth = (raw as NSString).size(withAttributes: [.font: font]).width
+            let glyphWidth = glyph.size(withAttributes: glyphAttrs).width
+            // Flipped context: text origin is its top edge, baseline sits one
+            // ascent below — so top = baseline − ascent aligns the glyph.
+            let topY = pos.baselineY - font.ascender
+            let centeredOrigin = CGPoint(x: pos.x + max(0, (markerWidth - glyphWidth) / 2), y: topY)
+
+            if isSelected {
+                // Selection paints the raw source char, and the optical
+                // alignment below is calibrated for the "•" glyph specifically,
+                // so plain centering is the right treatment here.
+                glyph.draw(at: centeredOrigin, withAttributes: glyphAttrs)
+            } else {
+                let localIndex = attrRange.location - range.location
+                let fallbackLineBounds = CGRect(
+                    x: pos.x,
+                    y: topY,
+                    width: markerWidth,
+                    height: max(1, font.ascender - font.descender)
+                )
+                let markerGeometry = BulletMarkerGeometry.make(
+                    markerOriginX: pos.x,
+                    markerWidth: markerWidth,
+                    lineBounds: self.lineBounds(forLocalIndex: localIndex, point: point) ?? fallbackLineBounds,
+                    font: font
+                )
+                glyph.draw(at: markerGeometry?.drawOrigin ?? centeredOrigin, withAttributes: glyphAttrs)
+            }
         }
     }
 
@@ -552,10 +582,6 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
     private func drawTaskCheckboxes(at point: CGPoint, in context: CGContext) {
         guard let ts = textStorage, let range = fragmentNSRange, range.length > 0 else { return }
-        let selectionRanges: [NSRange] = {
-            guard let tv = textLayoutManager?.textContainer?.textView else { return [] }
-            return tv.selectedRanges.map { $0.rangeValue }.filter { $0.length > 0 }
-        }()
 
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
@@ -564,19 +590,27 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
         ts.enumerateAttribute(.taskCheckbox, in: range, options: []) { [weak self] value, attrRange, _ in
             guard let self, value != nil else { return }
-            if selectionRanges.contains(where: { NSIntersectionRange($0, attrRange).length > 0 }) { return }
-
+            // A `.taskCheckbox` range means the styler cleared the raw `- [ ]`
+            // (and collapsed the box's advance), so the box must ALWAYS be
+            // drawn — including while the range sits inside a selection. An
+            // earlier selection-skip here left an empty marker-width gap (the
+            // bullet-marker blank-slot bug's twin). Unlike bullets, the raw
+            // source can't be painted here instead: the hidden `[ ]` advance
+            // is collapsed, so raw glyphs would overlap the content — raw
+            // reveal stays caret-based (taskRevealed in the styler).
             let isChecked = (value as? Bool) ?? false
             guard let pos = drawPosition(forDocumentCharAt: attrRange.location, point: point) else { return }
 
-            let font = (ts.attribute(.font, at: attrRange.location, effectiveRange: nil) as? NSFont)
-                ?? (textLayoutManager?.textContainer?.textView?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize))
+            // Box collapsed to 0.1pt, so pos.x sits at the content edge; the
+            // square is right-aligned to it (shared with the click hit-test).
+            // Use baseFont, NOT NSTextView.font — its getter returns the first
+            // char's font (0.1pt in a heading-first doc → 1px boxes).
+            let font = (textLayoutManager?.textContainer?.textView as? NativeTextView)?.baseFont
+                ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
             let ascent = max(0, font.ascender)
             let descent = max(0, -font.descender)
-            let fontHeight = max(1, ceil(ascent + descent))
-            let markerWidth = ("[ ]" as NSString).size(withAttributes: [.font: font]).width
-            let size = max(1.0, min(floor(fontHeight * 1.2), floor(markerWidth * 1.2)))
-            let boxX = pos.x + max(0, (markerWidth - size) / 2)
+            let size = TaskCheckboxGeometry.size(for: font)
+            let boxX = TaskCheckboxGeometry.boxX(contentX: pos.x, size: size)
             let centerY = pos.baselineY + (descent - ascent) / 2
             let boxY = centerY - size / 2
 
@@ -590,11 +624,17 @@ final class MarkdownTextLayoutFragment: NSTextLayoutFragment {
 
             let iconInset = max(0.0, size * 0.01)
             let iconRect = boxRect.insetBy(dx: iconInset, dy: iconInset)
-            let symbolName = isChecked ? "checkmark.square.fill" : "square"
-            if let baseSymbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
+            let configuration = (textLayoutManager?.textContainer?.textView as? NativeTextView)?.configuration
+                ?? .default
+            let style = configuration.taskCheckbox
+            let symbolName = isChecked ? style.checkedSymbolName : style.uncheckedSymbolName
+            let fallbackName = isChecked
+                ? TaskCheckboxStyle.default.checkedSymbolName
+                : TaskCheckboxStyle.default.uncheckedSymbolName
+            if let baseSymbol = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
+                ?? NSImage(systemSymbolName: fallbackName, accessibilityDescription: nil) {
                 let sizeConfig = NSImage.SymbolConfiguration(pointSize: iconRect.height, weight: .regular)
-                let theme = (textLayoutManager?.textContainer?.textView as? NativeTextView)?.configuration.theme ?? .default
-                let tint = isChecked ? theme.bodyText : theme.mutedText
+                let tint = isChecked ? configuration.theme.bodyText : configuration.theme.mutedText
                 let colorConfig = NSImage.SymbolConfiguration(hierarchicalColor: tint)
                 let symbolConfig = sizeConfig.applying(colorConfig)
                 let symbol = baseSymbol.withSymbolConfiguration(symbolConfig) ?? baseSymbol
@@ -611,6 +651,15 @@ final class MarkdownLayoutManagerDelegate: NSObject, NSTextLayoutManagerDelegate
         _ textLayoutManager: NSTextLayoutManager,
         textLayoutFragmentFor location: any NSTextLocation,
         in textElement: NSTextElement
+    ) -> NSTextLayoutFragment {
+        PerfTrace.accumulate("fragProv") {
+            makeFragment(textLayoutManager: textLayoutManager, textElement: textElement)
+        }
+    }
+
+    private func makeFragment(
+        textLayoutManager: NSTextLayoutManager,
+        textElement: NSTextElement
     ) -> NSTextLayoutFragment {
         let fragment = MarkdownTextLayoutFragment(textElement: textElement, range: textElement.elementRange)
         // Seed body font + paragraphStyle so the trailing fragment doesn't inherit heading metrics (FB15131180).

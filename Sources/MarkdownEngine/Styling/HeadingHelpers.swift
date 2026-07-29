@@ -11,13 +11,15 @@ import AppKit
 enum HeadingHelpers {
 
     /// Use heading context to scale LaTeX font size consistently with surrounding text.
+    /// `headings` is the document's heading tokens, built once per styling pass —
+    /// scanning all tokens per LaTeX token here was O(#latex × #tokens).
     static func latexFontSize(
         for token: MarkdownToken,
-        tokens: [MarkdownToken],
+        headings: [MarkdownToken],
         baseFont: NSFont,
         configuration: HeadingStyle = .default
     ) -> CGFloat {
-        if let headingToken = tokens.first(where: { $0.kind == .heading && NSLocationInRange(token.contentRange.location, $0.contentRange) }) {
+        if let headingToken = headings.first(where: { NSLocationInRange(token.contentRange.location, $0.contentRange) }) {
             let level = headingToken.markerRanges.first?.length ?? 1
             return baseFont.pointSize * configuration.fontMultiplier(for: level)
         }
@@ -26,15 +28,5 @@ enum HeadingHelpers {
 
     static func textWidth(_ text: String, font: NSFont) -> CGFloat {
         (text as NSString).size(withAttributes: [.font: font]).width
-    }
-
-    static func checkboxExtraSpacing(
-        font: NSFont,
-        configuration: CheckboxStyle = .default
-    ) -> CGFloat {
-        max(
-            configuration.minimumExtraSpacing,
-            ceil(font.pointSize * configuration.extraSpacingPerFontPointFraction)
-        )
     }
 }

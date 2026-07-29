@@ -5,7 +5,7 @@ All notable changes to swift-markdown-engine are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — beadazzle/automatic-links fork branch
+## [Unreleased] — beadazzle fork branch
 
 ### Added
 - `AutomaticLinkProvider` service: hosts define links in otherwise plain Markdown
@@ -25,6 +25,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   built-in link cursor rects would fight the modifier-dependent cursor of
   command-click automatic links and flicker. Built-in cursor-rect behaviors
   (e.g. link tooltips) are disabled for all embedders as a result.
+
+## [0.10.1] - 2026-07-22
+
+### Added
+- Custom SF Symbols for task checkboxes: `MarkdownEditorConfiguration` accepts
+  custom unchecked and checked symbols for `- [ ]` / `- [x]` task-list items
+  (opt-in; the defaults are unchanged).
+
+### Fixed
+- List markers no longer disappear while a selection covers them, and selecting
+  a list item now reveals its raw marker syntax like other inline constructs.
+- An unclosed ``` fence no longer swallows the rest of the document: typing an
+  opening fence above existing content left every block below it (tables,
+  block LaTeX, thematic breaks, links) unrendered until the closing fence was
+  typed. A fence now forms a code block only once its closing fence exists.
+
+## [0.10.0] - 2026-07-15
+
+### Added
+- **Extension seam**: opt-in constructs beyond pure markdown. A
+  `MarkdownExtension` contributes an inline form (`==highlight==`), a fenced
+  block form (`::: … :::`), or both — plus content attributes and an HTML
+  wrapper for the clean-copy path; register instances via
+  `MarkdownEditorConfiguration.extensions`. Extensions never emit ranges — the
+  parser derives all geometry, so a misbehaving extension can at worst restyle
+  its own construct. Marker/fence hiding, caret reveal, incremental restyle,
+  table cells, and rich copy are handled generically. Registered extensions can
+  change at runtime; all parse caches key on the registry.
+- `HighlightExtension` (`==text==`) and `StrikethroughExtension` (`~~text~~`),
+  the former built-ins repackaged as extensions, and `ContainerExtension`
+  (`::: … :::`), the first fenced block extension.
+
+### Changed
+- **Breaking**: `==highlight==` and `~~strikethrough~~` are no longer part of
+  the core grammar. Unregistered, the syntax stays literal text. To keep the
+  previous behavior:
+  `configuration.extensions = [HighlightExtension(), StrikethroughExtension()]`.
+  The formatting actions (context menu, `applyHighlightRequest` /
+  `applyStrikethroughRequest`) still insert/remove the markers either way;
+  construct detection (toggle-off, selection state) requires the extension.
+
+### Fixed
+- A pre-existing incremental-parse gap surfaced by the seam review:
+  backspace-joining two paragraphs could leave transiently wrong styling
+  (extra spacing or a stray emphasis/code span across the join) until the next
+  edit re-parsed the region.
+
+## [0.9.0] - 2026-07-13
+
+### Added
+- `MarkdownEditorConfiguration.rawSourceMode`: present the document as raw
+  Markdown source — no syntax hiding, no markdown styling, and no wiki-link
+  display transform (`[[Name|UUID]]` shows verbatim). The editor keeps base
+  font/paragraph styling and stays fully editable; smart Markdown input
+  handling (list continuation, `$$`/`![[` auto-wrap, ⇧⇥ outdent) is disabled
+  while raw. Runtime switching is supported and rebuilds the document
+  immediately; the current document's undo stack is dropped on a switch
+  because undo actions recorded against the other mode's display text would
+  replay at stale ranges. Default `false` — existing embedders are unaffected.
+- Find & replace: two optional bus notifications, `replaceCurrent` (replace the
+  focused match and advance) and `replaceAll` (replace every match in one undo
+  step, back-to-front so ranges stay valid). Both edit the engine's displayed
+  text with proper `shouldChangeText`/`didChangeText` undo registration and
+  report the remaining count via `findResults`. Purely additive — embedders that
+  don't set the bus names are unaffected.
+- Clean clipboard: ⌘C copies the selection as rich text (RTF + `com.apple.webarchive`)
+  built from the AST rather than the raw storage form, and paste converts HTML to
+  Markdown. Wiki-link `[[Name|UUID]]` side-channels no longer leak into copied text.
+
+### Fixed
+- Find/jump scroll now works without a reading column. The TextKit 2
+  fragment-enumeration scroll path (with `.ensuresLayout`) runs universally
+  instead of only when `readingWidth` was set; the unreliable
+  `NSTextView.scrollRangeToVisible` (which routes through the absent TextKit 1
+  layout manager for off-screen content) is now only the last-resort fallback.
+- Inline syntax markers (`**`, `*`, `~~`, `==`) now use `mutedText` foreground
+  color while the caret is inside the corresponding span, matching the existing
+  behavior of inline code backticks and link/wiki-link brackets. This makes
+  highlight `==` markers visually distinct from body text in edit state.
+- Web links `[text](url)` now share the wiki-link "edit zone": clicking the outer
+  ~30% of the link's first/last visible character places the caret just outside the
+  markers (before `[` / after `)`) and reveals the source for editing instead of
+  navigating, matching `[[…]]` behavior. Previously the edit zone only resolved
+  `.wikiLink` tokens, so a web link dropped the caret between its brackets and did
+  not reveal. Middle-of-link clicks still navigate; read-only links stay navigable.
+- Auto-linking (`NSDataDetector`) no longer linkifies a URL that sits inside a
+  markdown or wiki link's own range. A link's `(url)` previously got its own
+  competing `.link` attribute on top of the link — making the raw URL independently
+  navigable and offsetting the click edit zone. Bare URLs outside links still
+  autolink; URLs inside code were already excluded.
+- Wiki links: UUID-robust labels/embeds and keyboard navigation in the inline
+  autocomplete list.
+
+### Contributors
+- Find/jump scroll fix and find & replace by @ChristineTham
+- Inline syntax-marker color fix by @sospartan
+- rawSourceMode, clean clipboard, web-link edit zone, and wiki-link robustness by @luca-chen198
+
+## [0.8.0] - 2026-06-28
 
 ### Added
 - `MarkdownEditorBus.findQuery` / `findResults`: query-based in-document find. The host posts a

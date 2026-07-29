@@ -27,8 +27,10 @@ enum MarkdownASTStyler {
         fontName: String,
         fontSize: CGFloat,
         caretLocation: Int = -1,
+        selection: NSRange? = nil,
         wikiLinkIDProvider: @escaping (NSRange) -> String? = { _ in nil },
         scopedRanges: [NSRange]? = nil,
+        precomputedBlocks: [Block]? = nil,
         configuration: MarkdownEditorConfiguration = .default
     ) -> [StyledRange] {
         let baseFont = NSFont(name: fontName, size: fontSize) ?? .systemFont(ofSize: fontSize)
@@ -60,11 +62,14 @@ enum MarkdownASTStyler {
             codeParagraphStyle: codePara,
             inlineMarkerFont: NSFont(name: fontName, size: hiddenSize) ?? .systemFont(ofSize: hiddenSize),
             caret: caretLocation,
+            selection: selection,
             config: configuration,
+            extensionsByID: configuration.extensionsByID,
             wikiLinkID: wikiLinkIDProvider,
             scopedRanges: scopedRanges
         )
-        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges)
+        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                                       registry: configuration.extensionRegistry)
         var attrs: [StyledRange] = []
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
@@ -79,7 +84,8 @@ enum MarkdownASTStyler {
         // Text/regex passes (AST-agnostic); AST code ranges drive the "skip inside code" checks.
         let codeRanges = collectCodeRanges(in: blocks)
         let checkboxRanges = collectCheckboxRanges(in: blocks)
-        styleAutoLinks(ctx: ctx, codeRanges: codeRanges, into: &attrs)
+        let linkRanges = collectLinkRanges(in: blocks)
+        styleAutoLinks(ctx: ctx, codeRanges: codeRanges, linkRanges: linkRanges, into: &attrs)
         styleIncompleteLinkBrackets(ctx: ctx, codeRanges: codeRanges, checkboxRanges: checkboxRanges, into: &attrs)
         return attrs
     }
@@ -92,8 +98,9 @@ enum MarkdownASTStyler {
             for node in nodes {
                 switch node {
                 case .code(let range, _): ranges.append(range)
-                case .emphasis(_, _, _, let children), .strikethrough(_, _, let children),
-                     .highlight(_, _, let children), .link(_, _, _, _, let children): walk(children)
+                case .emphasis(_, _, _, let children),
+                     .link(_, _, _, _, let children): walk(children)
+                case .ext(let node): walk(node.children)
                 default: break
                 }
             }
@@ -105,6 +112,8 @@ enum MarkdownASTStyler {
                 walk(inlines)
             case .list(_, let items):
                 for item in items { walk(item.inlines) }
+            case .ext(let node):
+                walk(node.inlines)
             default: break
             }
         }
@@ -113,6 +122,42 @@ enum MarkdownASTStyler {
 
     private static func isInCode(_ range: NSRange, _ codeRanges: [NSRange]) -> Bool {
         codeRanges.contains { NSIntersectionRange($0, range).length > 0 }
+    }
+
+    /// Full ranges of markdown links `[text](url)` and wiki links `[[…]]`. The NSDataDetector
+    /// auto-link pass skips URLs inside these, so a link's own `(url)` isn't independently
+    /// linkified into a second, competing `.link` region overlapping the link (which offsets
+    /// the click edit-zone and makes the raw URL navigable).
+    private static func collectLinkRanges(in blocks: [BlockNode]) -> [NSRange] {
+        var ranges: [NSRange] = []
+        func walk(_ nodes: [InlineNode]) {
+            for node in nodes {
+                switch node {
+                case .link(let range, _, _, _, let children):
+                    ranges.append(range)
+                    walk(children)
+                case .wikiLink(let range, _, _, _):
+                    ranges.append(range)
+                case .emphasis(_, _, _, let children):
+                    walk(children)
+                case .ext(let node):
+                    walk(node.children)
+                default: break
+                }
+            }
+        }
+        for block in blocks {
+            switch block {
+            case .paragraph(_, let inlines), .heading(_, _, _, let inlines), .blockquote(_, let inlines):
+                walk(inlines)
+            case .list(_, let items):
+                for item in items { walk(item.inlines) }
+            case .ext(let node):
+                walk(node.inlines)
+            default: break
+            }
+        }
+        return ranges
     }
 
     /// Checkbox boxes (`[ ]`/`[x]`), excluded so the incomplete-link pass doesn't repaint their brackets.
@@ -159,14 +204,30 @@ enum MarkdownASTStyler {
         // 1. Indent paragraph style (hanging indent so wrapped lines align).
         let wsRange = NSRange(location: item.range.location, length: item.marker.location - item.range.location)
         let ws = ctx.ns.substring(with: wsRange)
-        let markerGroup = NSRange(location: item.marker.location,
+        // Revealed while the caret edits the syntax (same test as the early
+        // return below): the raw `- [ ]` stays at full advance.
+        let taskRevealed: Bool = {
+            guard let box = item.checkbox else { return false }
+            let syntax = NSRange(location: item.marker.location, length: NSMaxRange(box) - item.marker.location)
+            // Caret edit OR a selection sweeping the syntax reveals the raw
+            // `- [ ]` — matching how token-based elements reveal on selection.
+            return NSLocationInRange(ctx.caret, syntax) || ctx.caret == NSMaxRange(box)
+                || ctx.selectionIntersects(syntax)
+        }()
+        // Hidden task item shares the bullet geometry: `[ ] ` collapses to ~zero
+        // advance below, so the hanging indent measures only `- ` and task
+        // content aligns with bullet content (the box replaces the bullet slot).
+        let markerGroup: NSRange
+        if let box = item.checkbox, !taskRevealed {
+            markerGroup = NSRange(location: item.marker.location,
+                                  length: box.location - item.marker.location)
+        } else {
+            markerGroup = NSRange(location: item.marker.location,
                                   length: item.contentRange.location - item.marker.location)
+        }
         let markerWidth = (ctx.ns.substring(with: markerGroup) as NSString)
             .size(withAttributes: [.font: ctx.baseFont]).width
         let depthIndent = CGFloat(MarkdownLists.indentLevel(from: ws)) * ctx.config.lists.indentPerLevel
-        let extraSpacing = (item.checkbox != nil && !item.checked)
-            ? HeadingHelpers.checkboxExtraSpacing(font: ctx.baseFont, configuration: ctx.config.checkbox)
-            : 0
         let ps = NSMutableParagraphStyle()
         let lineHeight = ctx.baseLineHeight + ctx.config.lists.extraLineHeight
         ps.minimumLineHeight = lineHeight
@@ -177,17 +238,30 @@ enum MarkdownASTStyler {
         ps.tabStops = []
         ps.defaultTabInterval = ctx.config.lists.indentPerLevel
         ps.firstLineHeadIndent = ctx.config.lists.indentPerLevel
-        ps.headIndent = ctx.config.lists.indentPerLevel + depthIndent + markerWidth + extraSpacing
+        // Wrapped lines hang under the first line's content (indent + marker
+        // width). No checkbox-specific extra: the box is a drawn overlay that
+        // doesn't change text advance, so adding it here (and only here, not to
+        // firstLineHeadIndent) shifted an unchecked task's wrapped lines right
+        // of its first line.
+        ps.headIndent = ctx.config.lists.indentPerLevel + depthIndent + markerWidth
         attrs.append((line, [.paragraphStyle: ps]))
 
         // 2. Marker decoration (suppressed while the caret edits the syntax).
         if let box = item.checkbox {
-            let syntax = NSRange(location: item.marker.location, length: NSMaxRange(box) - item.marker.location)
-            if NSLocationInRange(ctx.caret, syntax) || ctx.caret == NSMaxRange(box) { return }
+            if taskRevealed { return }
             let spacer = NSRange(location: NSMaxRange(item.marker), length: box.location - NSMaxRange(item.marker))
+            // `- ` keeps full advance (the box's slot, like the bullet `•`);
+            // `[ ]` + trailing space collapse to the hidden-marker font so the
+            // content starts at the bullet-content x.
             attrs.append((item.marker, [.foregroundColor: NSColor.clear]))
             if spacer.length > 0 { attrs.append((spacer, [.foregroundColor: NSColor.clear])) }
-            attrs.append((box, [.taskCheckbox: item.checked, .foregroundColor: NSColor.clear]))
+            attrs.append((box, [.taskCheckbox: item.checked, .foregroundColor: NSColor.clear,
+                                .font: ctx.inlineMarkerFont]))
+            let postGap = NSRange(location: NSMaxRange(box),
+                                  length: item.contentRange.location - NSMaxRange(box))
+            if postGap.length > 0 {
+                attrs.append((postGap, [.foregroundColor: NSColor.clear, .font: ctx.inlineMarkerFont]))
+            }
             if item.checked, NSMaxRange(item.range) > NSMaxRange(box) {
                 attrs.append((NSRange(location: NSMaxRange(box), length: NSMaxRange(item.range) - NSMaxRange(box)), [
                     .strikethroughStyle: NSUnderlineStyle.single.rawValue,
@@ -202,11 +276,15 @@ enum MarkdownASTStyler {
         }
     }
 
-    private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], into attrs: inout [StyledRange]) {
+    private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], linkRanges: [NSRange], into attrs: inout [StyledRange]) {
         guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
         for scan in ctx.scanRanges {
             detector.enumerateMatches(in: ctx.text, range: scan) { match, _, _ in
-                guard let match, let url = match.url, !isInCode(match.range, codeRanges) else { return }
+                // Skip URLs inside code and inside a markdown/wiki link's own range — a link's
+                // `(url)` must not become a second `.link` region competing with the link itself.
+                guard let match, let url = match.url,
+                      !isInCode(match.range, codeRanges),
+                      !isInCode(match.range, linkRanges) else { return }
                 attrs.append((match.range, [.link: url]))
             }
         }
@@ -244,9 +322,24 @@ enum MarkdownASTStyler {
         let codeParagraphStyle: NSParagraphStyle
         let inlineMarkerFont: NSFont
         let caret: Int
+        /// The full selected range (nil/empty when the selection is a bare
+        /// caret). Token-based elements already reveal on selection via
+        /// `activeTokenIndices(selection:)`; this brings the same signal to
+        /// non-token elements (task checkboxes). Proven root cause: the
+        /// caret-only reveal can hit at most ONE selected task line — every
+        /// other selected line stayed hidden.
+        let selection: NSRange?
         let config: MarkdownEditorConfiguration
+        let extensionsByID: [String: any MarkdownExtension]
         let wikiLinkID: (NSRange) -> String?
         let scopedRanges: [NSRange]?
+
+        /// True when a non-empty selection overlaps `range` — the selection
+        /// counterpart of `isActive` for elements that reveal on select.
+        func selectionIntersects(_ range: NSRange) -> Bool {
+            guard let selection, selection.length > 0 else { return false }
+            return NSIntersectionRange(selection, range).length > 0
+        }
 
         /// Active (syntax revealed) when the caret is inside the range or at its end (minus a newline).
         func isActive(_ range: NSRange) -> Bool {
@@ -306,9 +399,40 @@ enum MarkdownASTStyler {
             styleCodeBlock(range: range, ctx: ctx, into: &attrs)
         case .thematicBreak(let range):
             styleThematicBreak(range: range, ctx: ctx, into: &attrs)
+        case .ext(let node):
+            styleExtensionBlock(node, font: font, ctx: ctx, into: &attrs)
         case .blockLatex, .table, .blank:
             break   // NSImage rendering ported next
         }
+    }
+
+    /// Extension fenced block: the extension supplies content ATTRIBUTES only;
+    /// they cover the WHOLE block (fence lines included) so the block reads as
+    /// one cohesive band — the hidden fences would otherwise sit as uncolored
+    /// blank rows above and below the body. Fence lines then mute while the
+    /// caret is inside the block and hide otherwise (mirroring code fences —
+    /// clear color, unchanged font, so the line keeps its height and layout
+    /// stays stable across the active flip).
+    private static func styleExtensionBlock(_ node: ExtensionBlockNode, font: NSFont, ctx: Ctx, into attrs: inout [StyledRange]) {
+        if let ext = ctx.extensionsByID[node.extensionID] {
+            var block = node.range
+            // Keep the block's trailing newline out, so the band doesn't
+            // bleed a full-width background onto the following line.
+            while block.length > 0 {
+                let last = ctx.ns.character(at: NSMaxRange(block) - 1)
+                guard last == 0x0A || last == 0x0D else { break }
+                block.length -= 1
+            }
+            if block.length > 0 {
+                attrs.append((block, ext.contentAttributes(theme: ctx.theme)))
+            }
+        }
+        let markerAttrs: [NSAttributedString.Key: Any] = ctx.isActive(node.range)
+            ? [.foregroundColor: ctx.theme.mutedText]
+            : [.foregroundColor: NSColor.clear]
+        attrs.append((node.openFence, markerAttrs))
+        if let close = node.closeFence { attrs.append((close, markerAttrs)) }
+        styleInlines(node.inlines, font: font, ctx: ctx, into: &attrs)
     }
 
     /// Per-line blockquote: indent, mute content, hide/show `>` markers, tag first char with bar level.
@@ -425,23 +549,25 @@ enum MarkdownASTStyler {
             case .text:
                 break
 
-            case .emphasis(let kind, _, let markers, let children):
+            case .emphasis(let kind, let range, let markers, let children):
                 let composed = adding(traits(for: kind), to: font)
                 attrs.append((content(of: markers), [.font: composed]))
+                if ctx.isActive(range) {
+                    for marker in markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+                }
                 styleInlines(children, font: composed, ctx: ctx, into: &attrs)
 
-            case .strikethrough(_, let markers, let children):
-                attrs.append((content(of: markers), [
-                    .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                    .strikethroughColor: ctx.theme.strikethroughColor,
-                ]))
-                styleInlines(children, font: font, ctx: ctx, into: &attrs)
-
-            case .highlight(_, let markers, let children):
-                attrs.append((content(of: markers), [
-                    .backgroundColor: ctx.theme.highlightColor,
-                ]))
-                styleInlines(children, font: font, ctx: ctx, into: &attrs)
+            case .ext(let node):
+                // Extension-contributed span: the extension supplies content
+                // ATTRIBUTES only; every range comes from the parser, so a
+                // misbehaving extension can restyle its own span at worst.
+                if let ext = ctx.extensionsByID[node.extensionID] {
+                    attrs.append((node.contentRange, ext.contentAttributes(theme: ctx.theme)))
+                }
+                if ctx.isActive(node.range) {
+                    for marker in node.markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+                }
+                styleInlines(node.children, font: font, ctx: ctx, into: &attrs)
 
             case .code(let range, let contentRange):
                 attrs.append((contentRange, [.font: ctx.codeFont, .backgroundColor: ctx.codeBackground]))
@@ -525,6 +651,8 @@ enum MarkdownASTStyler {
             case .list(_, let items):
                 // Phase A: shrink only inline markers; the list marker is hidden by the bullet/task pass.
                 for item in items { shrinkInlineMarkers(item.inlines, ctx: ctx, into: &attrs) }
+            case .ext(let node):
+                shrinkInlineMarkers(node.inlines, ctx: ctx, into: &attrs)
             case .codeBlock, .blockLatex, .table, .thematicBreak, .blank:
                 break
             }
@@ -539,14 +667,10 @@ enum MarkdownASTStyler {
                 let active = forceReveal || ctx.isActive(range)
                 if !active { shrink(markers, ctx: ctx, into: &attrs) }
                 shrinkInlineMarkers(children, ctx: ctx, forceReveal: active, into: &attrs)
-            case .strikethrough(let range, let markers, let children):
-                let active = forceReveal || ctx.isActive(range)
-                if !active { shrink(markers, ctx: ctx, into: &attrs) }
-                shrinkInlineMarkers(children, ctx: ctx, forceReveal: active, into: &attrs)
-            case .highlight(let range, let markers, let children):
-                let active = forceReveal || ctx.isActive(range)
-                if !active { shrink(markers, ctx: ctx, into: &attrs) }
-                shrinkInlineMarkers(children, ctx: ctx, forceReveal: active, into: &attrs)
+            case .ext(let node):
+                let active = forceReveal || ctx.isActive(node.range)
+                if !active { shrink(node.markers, ctx: ctx, into: &attrs) }
+                shrinkInlineMarkers(node.children, ctx: ctx, forceReveal: active, into: &attrs)
             case .link(let range, _, _, let markers, let children):
                 let active = forceReveal || ctx.isActive(range)
                 if !active {

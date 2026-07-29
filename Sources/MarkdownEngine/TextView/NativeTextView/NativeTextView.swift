@@ -26,6 +26,11 @@ final class NativeTextView: NSTextView {
     /// Coalesces wide-table overlay updates to once per runloop (resize fires many per frame).
     var pendingWideTableOverlayUpdate = false
     var suppressAutoRevealOnce: Bool = false
+    // Set by clickedOnLink during a mouseDown: did the delegate fire (so
+    // mouseDown can re-dispatch a click AppKit dropped), and did it navigate
+    // (so the pre-click caret is restored — a link click isn't caret placement).
+    var linkClickDidFire = false
+    var linkClickDidNavigate = false
 
     // MARK: Configuration
     var configuration: MarkdownEditorConfiguration = .default {
@@ -109,6 +114,13 @@ final class NativeTextView: NSTextView {
               let coord = delegate as? NativeTextViewCoordinator else { return }
         let marked = markedRange()
         guard marked.location != NSNotFound, marked.length > 0 else { return }
+        // The composition mutated the storage without textDidChange, and
+        // shouldChangeTextIn's own parse re-cached the PRE-edit string at the
+        // current generation — bump so the restyle below reparses instead of
+        // serving that stale document (same-length composition updates).
+        coord.parseGeneration &+= 1
+        // Census bookkeeping never saw this mutation → next census full-scans.
+        coord.backtickCensusNeedsRescan = true
         let nsText = self.string as NSString
         let paragraph = nsText.paragraphRange(for: marked)
         coord.restyleParagraphs([paragraph], in: self)

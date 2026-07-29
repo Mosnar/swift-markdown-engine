@@ -20,15 +20,34 @@ extension NativeTextViewCoordinator {
         invalidateLayout: Bool = false
     ) {
         // Storage is raw Markdown; only wiki links transform on display.
-        let displayState = WikiLinkService.makeDisplayState(from: text)
-        let displayText = displayState.display
-        wikiLinkMetadata = displayState.metadata
+        // In raw source mode display IS storage — no transform, no metadata.
+        let services = configuration.services
+        let rawMode = configuration.rawSourceMode
+        let displayText: String
+        if rawMode {
+            displayText = text
+            wikiLinkMetadata = [:]
+        } else {
+            let displayState = WikiLinkService.makeDisplayState(from: text) { services.wikiLinks.name(forID: $0) }
+            displayText = displayState.display
+            wikiLinkMetadata = displayState.metadata
+        }
 
         if textView.string != displayText {
             textView.string = displayText
+            parseGeneration &+= 1
         }
         lastSyncedText = text
+        lastComputedStorage = text
+        previousDisplayLength = (displayText as NSString).length
         let nsDisplay = displayText as NSString
+        // Fresh document baseline: drop the incremental parse state and reseed
+        // the backtick census (a stale count from the previous document would
+        // force a spurious full-document restyle on the first keystroke).
+        parseState.invalidate()
+        pendingBacktickWindow = nil
+        backtickCensusNeedsRescan = false
+        previousBacktickCount = MarkdownDetection.tripleBacktickCount(in: nsDisplay)
         let fullRange = NSRange(location: 0, length: nsDisplay.length)
 
         let (baseFont, paragraph) = TextStylingService.makeBaseFontAndStyle(
@@ -46,29 +65,44 @@ extension NativeTextViewCoordinator {
         textView.textStorage?.removeAttribute(.link, range: fullRange)
         textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
 
-        let tokens = parsedDocument(for: displayText).tokens
-        // Hide caret from styling when read-only, else clicks reveal raw token syntax.
-        let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
-        activeTokenIndices = MarkdownDetection.computeActiveTokenIndices(
-            selectionRange: textView.selectedRange(),
-            tokens: tokens,
-            in: nsDisplay,
-            suppressed: !textView.isEditable
-        )
+        if rawMode {
+            // Base attributes only — the source stays verbatim and unstyled.
+            activeTokenIndices = []
+        } else {
+            let parsed = parsedDocument(for: displayText)
+            let tokens = parsed.tokens
+            // Hide caret from styling when read-only, else clicks reveal raw token syntax.
+            let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
+            activeTokenIndices = activeTokenIndices(
+                parsed: parsed,
+                selection: textView.selectedRange(),
+                in: nsDisplay,
+                suppressed: !textView.isEditable
+            )
 
-        let ranges = MarkdownStyler.styleAttributes(
-            text: displayText,
-            fontName: fontName,
-            fontSize: fontSize,
-            layoutBridge: layoutBridge,
-            caretLocation: caretLocation,
-            activeTokenIndices: activeTokenIndices,
-            precomputedTokens: tokens,
-            configuration: configuration
-        )
-        for (range, attrs) in ranges {
-            for (key, value) in attrs {
-                textView.textStorage?.addAttribute(key, value: value, range: range)
+            let ranges = MarkdownStyler.styleAttributes(
+                text: displayText,
+                fontName: fontName,
+                fontSize: fontSize,
+                layoutBridge: layoutBridge,
+                caretLocation: caretLocation,
+                // Selection-revealed syntax (task checkboxes) needs the full
+                // range, not just the caret; read-only suppresses it like the caret.
+                selection: textView.isEditable ? textView.selectedRange() : nil,
+                activeTokenIndices: activeTokenIndices,
+                // FIX: apply .wikiLinkID attributes on load/node-switch too. Without this the uuid
+                // survived only in the range-keyed wikiLinkMetadata; once a later writeback shifted a
+                // link's range the metadata key missed and makeStorageState wrote [[Name]] (uuid lost).
+                // wikiLinkMetadata was just refreshed by makeDisplayState above, so ranges match here.
+                wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
+                precomputedTokens: tokens,
+                classified: parsed.classified,
+                configuration: configuration
+            )
+            for (range, attrs) in ranges {
+                for (key, value) in attrs {
+                    textView.textStorage?.addAttribute(key, value: value, range: range)
+                }
             }
         }
         textView.textStorage?.endEditing()
@@ -97,8 +131,12 @@ extension NativeTextViewCoordinator {
     func restyleTextView(
         _ textView: NSTextView,
         paragraphCandidates: [NSRange],
-        tokens: [MarkdownToken]? = nil
+        tokens: [MarkdownToken]? = nil,
+        classified: MarkdownStyler.ClassifiedStyleTokens? = nil,
+        blocks: [Block]? = nil
     ) {
+        // Raw mode: no restyling; typing keeps base attrs via the typing shim.
+        guard !configuration.rawSourceMode else { return }
         let (baseFont, paragraphStyle) = TextStylingService.makeBaseFontAndStyle(
             fontName: fontName,
             fontSize: fontSize,
@@ -113,11 +151,17 @@ extension NativeTextViewCoordinator {
             baseFont: baseFont,
             paragraphStyle: paragraphStyle,
             caretLocation: textView.isEditable ? textView.selectedRange().location : -1,
+            // Selection-revealed task syntax: this is the per-keystroke /
+            // selection-change restyle path, so the styler needs the full
+            // selected range here too (read-only suppresses it like the caret).
+            selection: textView.isEditable ? textView.selectedRange() : nil,
             activeTokenIndices: activeTokenIndices,
             wikiLinkIDProvider: { [weak self] range in
                 self?.wikiLinkID(for: range)
             },
             precomputedTokens: tokens,
+            classified: classified,
+            precomputedBlocks: blocks,
             configuration: configuration
         )
         // Reconcile wide-table overlays after layout settles.
@@ -128,51 +172,109 @@ extension NativeTextViewCoordinator {
         }
     }
 
-    func parsedDocument(for text: String) -> ParsedDocument {
-        if cachedParsedText == text, let cachedParsedDocument {
-            return cachedParsedDocument
+    func parsedDocument(for text: String, edit: ParseEditDescriptor? = nil) -> ParsedDocument {
+        let length = (text as NSString).length
+        if let cachedParsedDocument, cachedParsedLength == length {
+            // O(1) hit: nothing has edited the storage since the cached parse.
+            if cachedParseGeneration == parseGeneration { return cachedParsedDocument }
+            // Generation moved but the text may still be identical (e.g. an
+            // attribute-only pass): confirm via NSString.isEqual (a byte
+            // compare — the bridged Swift `==` walked 139k chars per keystroke).
+            if let cachedParsedText, (cachedParsedText as NSString).isEqual(to: text) {
+                cachedParseGeneration = parseGeneration
+                return cachedParsedDocument
+            }
         }
 
-        let tokens = MarkdownTokenizer.parseTokensViaAST(in: text)
+        let tokens = parseState.tokens(for: text, edit: edit, registry: cachedExtensionRegistry)
+        let tClassify = DispatchTime.now().uptimeNanoseconds
         var codeTokens: [MarkdownToken] = []
         var latexTokens: [MarkdownToken] = []
         var blockLatexTokens: [MarkdownToken] = []
         var wikiLinkTokens: [MarkdownToken] = []
         var imageEmbedTokens: [MarkdownToken] = []
+        var tableTokens: [MarkdownToken] = []
+        var codeBlockTokensWithIndices: [(index: Int, token: MarkdownToken)] = []
+        var inlineLatexIdx: [(index: Int, token: MarkdownToken)] = []
+        var blockLatexIdx: [(index: Int, token: MarkdownToken)] = []
+        var imageEmbedIdx: [(index: Int, token: MarkdownToken)] = []
+        var imageLinkIdx: [(index: Int, token: MarkdownToken)] = []
+        var tableIdx: [(index: Int, token: MarkdownToken)] = []
 
         codeTokens.reserveCapacity(tokens.count / 2)
         latexTokens.reserveCapacity(tokens.count / 4)
         blockLatexTokens.reserveCapacity(tokens.count / 4)
         wikiLinkTokens.reserveCapacity(tokens.count / 4)
 
-        for token in tokens {
+        for (index, token) in tokens.enumerated() {
             switch token.kind {
             case .codeBlock, .inlineCode:
                 codeTokens.append(token)
+                if token.kind == .codeBlock {
+                    codeBlockTokensWithIndices.append((index, token))
+                }
             case .inlineLatex:
                 latexTokens.append(token)
+                inlineLatexIdx.append((index, token))
             case .blockLatex:
                 blockLatexTokens.append(token)
+                blockLatexIdx.append((index, token))
             case .wikiLink:
                 wikiLinkTokens.append(token)
             case .imageEmbed:
                 imageEmbedTokens.append(token)
+                imageEmbedIdx.append((index, token))
+            case .imageLink:
+                imageLinkIdx.append((index, token))
+            case .table:
+                tableTokens.append(token)
+                tableIdx.append((index, token))
             default:
                 break
             }
         }
 
+        parsedDocumentVersion &+= 1
         let parsed = ParsedDocument(
             tokens: tokens,
+            blocks: parseState.currentBlocks,
             codeTokens: codeTokens,
             latexTokens: latexTokens,
             blockLatexTokens: blockLatexTokens,
             wikiLinkTokens: wikiLinkTokens,
-            imageEmbedTokens: imageEmbedTokens
+            imageEmbedTokens: imageEmbedTokens,
+            tableTokens: tableTokens,
+            codeBlockTokensWithIndices: codeBlockTokensWithIndices,
+            classified: MarkdownStyler.ClassifiedStyleTokens(
+                inlineLatex: inlineLatexIdx, blockLatex: blockLatexIdx,
+                imageEmbed: imageEmbedIdx, imageLink: imageLinkIdx,
+                table: tableIdx, code: codeTokens),
+            version: parsedDocumentVersion
         )
         cachedParsedText = text
+        cachedParsedLength = length
+        cachedParseGeneration = parseGeneration
         cachedParsedDocument = parsed
+        PerfTrace.note {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - tClassify) / 1_000_000
+            return "classify=\(String(format: "%.2f", ms))ms #tokens=\(tokens.count)"
+        }
         return parsed
+    }
+
+    /// Memoized computeActiveTokenIndices — a pure function of
+    /// (parsed.version, selection, suppressed) that otherwise runs up to
+    /// three times per keystroke on identical inputs (pre-edit ask,
+    /// selection change, textDidChange).
+    func activeTokenIndices(parsed: ParsedDocument, selection: NSRange, in text: NSString, suppressed: Bool) -> Set<Int> {
+        if let memo = activeTokenMemo, memo.version == parsed.version,
+           memo.selection == selection, memo.suppressed == suppressed {
+            return memo.result
+        }
+        let result = MarkdownDetection.computeActiveTokenIndices(
+            selectionRange: selection, tokens: parsed.tokens, in: text, suppressed: suppressed)
+        activeTokenMemo = (parsed.version, selection, suppressed, result)
+        return result
     }
 
     func paragraphRanges(
@@ -227,16 +329,18 @@ extension NativeTextViewCoordinator {
     }
 
     func restyleParagraphs(_ paragraphs: [NSRange], in textView: NSTextView) {
-        let parsed = parsedDocument(for: textView.string)
+        let docText = textView.string      // one O(doc) bridge, reused below
+        let parsed = parsedDocument(for: docText)
         let tokens = parsed.tokens
-        let nsText = textView.string as NSString
-        activeTokenIndices = MarkdownDetection.computeActiveTokenIndices(
-            selectionRange: textView.selectedRange(),
-            tokens: tokens,
+        let nsText = docText as NSString
+        activeTokenIndices = activeTokenIndices(
+            parsed: parsed,
+            selection: textView.selectedRange(),
             in: nsText,
             suppressed: !textView.isEditable
         )
-        restyleTextView(textView, paragraphCandidates: paragraphs, tokens: tokens)
+        restyleTextView(textView, paragraphCandidates: paragraphs, tokens: tokens,
+                        classified: parsed.classified, blocks: parsed.blocks)
     }
 
     func applyInlineReplacement(_ request: InlineReplacementRequest, to textView: NSTextView) {
@@ -249,16 +353,11 @@ extension NativeTextViewCoordinator {
             return
         }
 
-        let replacementDisplay: String
-        let linkID: String?
-        if request.isImageEmbedMode {
-            replacementDisplay = request.storageFragment
-            linkID = nil
-        } else {
-            let replacementInfo = WikiLinkService.displayFragmentAndID(from: request.storageFragment)
-            replacementDisplay = replacementInfo.display
-            linkID = replacementInfo.id
-        }
+        // Image embeds and node links share one path: insert DISPLAY form `![[Name]]` / `[[Name]]`
+        // with the opaque suffix on the `.wikiLinkID` side-channel (displayFragmentAndID handles `!`).
+        let replacementInfo = WikiLinkService.displayFragmentAndID(from: request.storageFragment)
+        let replacementDisplay = replacementInfo.display
+        let linkID = replacementInfo.id
 
         let undoActionName = request.isImageEmbedMode ? "Insert Image Embed" : "Insert Link"
         textView.breakUndoCoalescing()
@@ -273,9 +372,11 @@ extension NativeTextViewCoordinator {
         textView.textStorage?.replaceCharacters(in: range, with: replacementDisplay)
 
         if let linkID, !linkID.isEmpty {
-            let contentLength = max(0, (replacementDisplay as NSString).length - 4)
+            let isImage = replacementDisplay.hasPrefix("![[")
+            let openLen = isImage ? 3 : 2
+            let contentLength = max(0, (replacementDisplay as NSString).length - (openLen + 2))
             if contentLength > 0 {
-                let contentRange = NSRange(location: range.location + 2, length: contentLength)
+                let contentRange = NSRange(location: range.location + openLen, length: contentLength)
                 textView.textStorage?.addAttribute(.wikiLinkID, value: linkID, range: contentRange)
             }
         }

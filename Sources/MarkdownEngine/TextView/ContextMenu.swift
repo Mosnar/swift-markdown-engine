@@ -57,19 +57,21 @@ extension NativeTextViewWrapper.Coordinator {
     }
 
     /// Returns the smallest highlight token that fully contains the selection, or nil.
+    /// Highlight is extension-supplied; without a registered `HighlightExtension`
+    /// no such token exists and the toggle only wraps/unwraps literal `==`.
     func enclosingHighlightToken(for selection: NSRange, in text: String) -> MarkdownToken? {
-        let tokens = parsedDocument(for: text).tokens
-        return tokens.first { token in
-            token.kind == .highlight && tokenEncloses(token, selection: selection)
-        }
+        enclosingToken(of: .extensionSpan(HighlightExtension.identifier), for: selection, in: text)
     }
 
     func isSelectionHighlight(in nsText: NSString, range: NSRange) -> Bool {
         return enclosingHighlightToken(for: range, in: nsText as String) != nil
     }
 
+    /// Strikethrough is extension-supplied; without a registered
+    /// `StrikethroughExtension` no such token exists and the toggle only
+    /// wraps/unwraps literal `~~`.
     func isSelectionStrikethrough(in nsText: NSString, range: NSRange) -> Bool {
-        return enclosingToken(of: .strikethrough, for: range, in: nsText as String) != nil
+        return enclosingToken(of: .extensionSpan(StrikethroughExtension.identifier), for: range, in: nsText as String) != nil
     }
 
     func isSelectionInlineCode(in nsText: NSString, range: NSRange) -> Bool {
@@ -120,7 +122,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let newSelectionLocation = token.range.location + leftReplacement.count
             tv.setSelectedRange(NSRange(location: newSelectionLocation, length: content.count))
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -165,7 +166,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let newSel = NSRange(location: lineRange.location + prefix.count, length: content.count)
             tv.setSelectedRange(newSel)
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -192,7 +192,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let newSel = NSRange(location: startLine.location + prefix.count, length: content.count)
             tv.setSelectedRange(newSel)
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -275,7 +274,7 @@ extension NativeTextViewWrapper.Coordinator {
         guard let tv = textView else { return }
         let range = tv.selectedRange()
 
-        if let token = enclosingToken(of: .strikethrough, for: range, in: tv.string) {
+        if let token = enclosingToken(of: .extensionSpan(StrikethroughExtension.identifier), for: range, in: tv.string) {
             unwrapToken(token, leftReplacement: "", rightReplacement: "")
             return
         }
@@ -441,7 +440,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.replaceCharacters(in: range, with: insertion)
             tv.didChangeText()
             tv.setSelectedRange(NSRange(location: range.location + marker.count, length: 0))
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 
@@ -463,7 +461,6 @@ extension NativeTextViewWrapper.Coordinator {
             tv.didChangeText()
             let newRange = NSRange(location: range.location + leadingWS + marker.count, length: core.count)
             tv.setSelectedRange(newRange)
-            DispatchQueue.main.async { self.text = tv.string }
         }
     }
 }

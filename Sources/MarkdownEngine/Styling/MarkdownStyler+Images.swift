@@ -20,7 +20,7 @@ extension MarkdownStyler {
     /// at which point we fall back to dimming the markdown source).
     static func styleImageLinks(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
-        for (idx, token) in ctx.tokens.enumerated() where token.kind == .imageLink {
+        for (idx, token) in ctx.scoped(ctx.imageLinkIndexed) {
             if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
 
             // The URL lives between markerRanges[2] ('(') and markerRanges[3] (')').
@@ -114,12 +114,20 @@ extension MarkdownStyler {
 
     static func styleImageEmbeds(_ ctx: StylingContext) -> [StyledRange] {
         var attrs: [StyledRange] = []
-        for (idx, token) in ctx.tokens.enumerated() where token.kind == .imageEmbed {
+        for (idx, token) in ctx.scoped(ctx.imageEmbedIndexed) {
             if MarkdownDetection.isInsideCodeBlock(range: token.range, codeTokens: ctx.codeTokens) { continue }
 
             let isActive = ctx.activeTokenIndices.contains(idx)
-            let rawContent = ctx.nsText.substring(with: token.contentRange)
-            guard let reference = ImageEmbedReference(content: rawContent) else {
+            let rawContent = ctx.nsText.substring(with: token.contentRange)  // = display name (no suffix)
+            // The uuid|width suffix lives in the `.wikiLinkID` side-channel (same as node links).
+            let suffix = ctx.wikiLinkIDProvider(token.range)
+            // Re-apply the attribute every restyle so makeStorageState can recover the suffix on
+            // save — even on the image-not-found path (mirrors styleWikiLink). Load-bearing.
+            if let suffix, !suffix.isEmpty {
+                attrs.append((token.contentRange, [.wikiLinkID: suffix]))
+            }
+            let referenceContent = (suffix?.isEmpty == false) ? "\(rawContent)|\(suffix!)" : rawContent
+            guard let reference = ImageEmbedReference(content: referenceContent) else {
                 appendSecondaryMarkers(for: token, to: &attrs, theme: ctx.configuration.theme)
                 continue
             }

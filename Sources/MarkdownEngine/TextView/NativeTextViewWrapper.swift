@@ -93,6 +93,9 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
     /// Fires when the caret enters or leaves a `[[Name]]` or `![[…]]`
     /// token. `nil` means the caret is no longer inside such a token.
     public var onInlineSelectionChange: ((InlineSelectionState?) -> Void)?
+    /// Fires on ↑/↓/Enter/Esc while an inline `[[…]]` preview is open, so the
+    /// embedder can drive its autocomplete list. Return `true` to consume the key.
+    public var onInlinePreviewKey: ((InlinePreviewKey) -> Bool)?
     /// Fires when the set of visible code blocks changes, so embedders can
     /// overlay copy buttons (see ``CodeBlockButton``).
     public var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
@@ -144,6 +147,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         onCaretRectChange: ((CGRect) -> Void)? = nil,
         onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)? = nil,
         onInlineSelectionChange: ((InlineSelectionState?) -> Void)? = nil,
+        onInlinePreviewKey: ((InlinePreviewKey) -> Bool)? = nil,
         onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)? = nil,
         onSpellCheckingPolicyChanged: ((SpellCheckingPolicy) -> Void)? = nil,
         placeholder: NSAttributedString? = nil,
@@ -167,6 +171,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         self.onCaretRectChange = onCaretRectChange
         self.onBuildContextMenu = onBuildContextMenu
         self.onInlineSelectionChange = onInlineSelectionChange
+        self.onInlinePreviewKey = onInlinePreviewKey
         self.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         self.onSpellCheckingPolicyChanged = onSpellCheckingPolicyChanged
         self.placeholder = placeholder
@@ -248,7 +253,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         textView.isEditable = isEditable
         textView.isSelectable = true
         textView.isRichText = true
-        let initialState = WikiLinkService.makeDisplayState(from: text)
+        let initialState = WikiLinkService.makeDisplayState(from: text) { configuration.services.wikiLinks.name(forID: $0) }
         textView.string = initialState.display
         textView.delegate = context.coordinator
         textView.isVerticallyResizable = true
@@ -310,6 +315,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onCaretRectChange = onCaretRectChange
         context.coordinator.onBuildContextMenu = onBuildContextMenu
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
+        context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
 
         textView.recalcOverscroll(for: scrollView)
@@ -456,6 +462,42 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
             (nsView as? ClampedScrollView)?.clampToInsets()
             nsView.invalidateIntrinsicContentSize()
         }
+        // Sync rawSourceMode; a flip rebuilds in the new presentation. It
+        // changes display text ([[Name]] ↔ [[Name|UUID]]), so drop the doc's
+        // undo stack — surviving actions would replay at stale ranges.
+        let rawSourceModeChanged = context.coordinator.configuration.rawSourceMode != configuration.rawSourceMode
+        if rawSourceModeChanged {
+            context.coordinator.configuration.rawSourceMode = configuration.rawSourceMode
+            textView.configuration.rawSourceMode = configuration.rawSourceMode
+            textView.breakUndoCoalescing()
+            context.coordinator.undoManagers[documentId]?.removeAllActions()
+            context.coordinator.didInitialFormatting = false
+            // isWikiLinkActive is a SwiftUI binding — defer off the update pass
+            // to avoid "Modifying state during view update".
+            let coordinator = context.coordinator
+            DispatchQueue.main.async { coordinator.isWikiLinkActive = false }
+        }
+        // Sync the input-behavior toggles (auto-close pairs, list helpers).
+        // The keystroke handlers read textView.configuration live, but only
+        // makeNSView used to write it — an embedder settings change was inert
+        // until the editor was rebuilt. Plain assignment: a tiny value struct,
+        // and no rebuild is needed for it to take effect.
+        textView.configuration.lists = configuration.lists
+        context.coordinator.configuration.lists = configuration.lists
+        // Sync registered extensions (inline spans + fenced blocks). A change alters the GRAMMAR
+        // (tokens differ under the new registry), so the coordinator's parsed
+        // cache must drop before the restyle — the parse-layer memos invalidate
+        // themselves via the registry fingerprint.
+        let newExtensionFingerprint = configuration.extensionRegistry.fingerprint
+        if newExtensionFingerprint != context.coordinator.configuration.extensionRegistry.fingerprint {
+            context.coordinator.configuration.extensions = configuration.extensions
+            textView.configuration.extensions = configuration.extensions
+            context.coordinator.cachedParsedDocument = nil
+            let fullRange = NSRange(location: 0, length: (textView.string as NSString).length)
+            if fullRange.length > 0 {
+                context.coordinator.restyleParagraphs([fullRange], in: textView)
+            }
+        }
         // Reading column centers by POSITION (container subview), so the text inset is constant.
         let desiredTextInset = NSSize(
             width: configuration.textInsets.horizontal,
@@ -564,7 +606,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.rebuildTextStorageAndStyle(
             textView,
             from: text,
-            invalidateLayout: isNodeSwitch
+            invalidateLayout: isNodeSwitch || rawSourceModeChanged
         )
         textView.recalcOverscroll(for: nsView)
         (nsView as? ClampedScrollView)?.clampToInsets()
@@ -585,6 +627,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         context.coordinator.onLinkClick = onLinkClick
         context.coordinator.onBuildContextMenu = onBuildContextMenu
         context.coordinator.onInlineSelectionChange = onInlineSelectionChange
+        context.coordinator.onInlinePreviewKey = onInlinePreviewKey
         context.coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
         context.coordinator.didInitialFormatting = true
     }
@@ -604,6 +647,7 @@ public struct NativeTextViewWrapper: NSViewRepresentable {
         coordinator.lastWikiFingerprint = configuration.services.wikiLinks.fingerprint()
         coordinator.lastAutomaticLinkFingerprint = configuration.services.automaticLinks.fingerprint()
         coordinator.onCodeBlockSelectionChange = onCodeBlockSelectionChange
+        coordinator.onInlinePreviewKey = onInlinePreviewKey
         coordinator.userPrefersContinuousSpellChecking = configuration.spellChecking.continuousSpellChecking
         coordinator.userPrefersGrammarChecking = configuration.spellChecking.grammarChecking
         coordinator.userPrefersAutomaticSpellingCorrection = configuration.spellChecking.automaticSpellingCorrection

@@ -40,8 +40,14 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         didSet {
             subscribeToBusNotifications(replacing: oldValue.services.bus)
             subscribeToAppearanceNotification()
+            // Precompiled registry for the per-keystroke parse path — deriving
+            // it from the configuration on every keystroke would rebuild the
+            // delimiter arrays + fingerprint string each time.
+            cachedExtensionRegistry = configuration.extensionRegistry
         }
     }
+    /// Memoized `configuration.extensionRegistry` (see didSet).
+    var cachedExtensionRegistry: ExtensionRegistry = .empty
     /// Last `EmbeddedImageProvider.fingerprint()` value we've reflected in
     /// the textView's attributes. We cache it here because embedders that
     /// MUTATE the same provider over time (async URL fetches, etc.) would
@@ -65,6 +71,7 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     /// default menu + current selection range, returns the menu to show.
     var onBuildContextMenu: ((NSMenu, NSRange) -> NSMenu)?
     var onInlineSelectionChange: ((InlineSelectionState?) -> Void)?
+    var onInlinePreviewKey: ((InlinePreviewKey) -> Bool)?
     var onCodeBlockSelectionChange: (([CodeBlockSelection]) -> Void)?
     var didInitialFormatting: Bool = false
     /// One-shot guard so `updateCodeBlockSelection` only forces a full-document layout once per document.
@@ -86,16 +93,72 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var previousActiveTokenIndices: Set<Int> = []
     var wikiLinkMetadata: [WikiLinkService.RangeKey: WikiLinkService.LinkMetadata] = [:]
     var previousBacktickCount: Int = 0
+    /// Backtick census baseline captured in shouldChangeTextIn: the pre-edit
+    /// window count around the proposed edit, so textDidChange can update the
+    /// census from the edited window alone instead of rescanning the document.
+    var pendingBacktickWindow: (location: Int, oldLength: Int, oldCount: Int)?
+    /// Whether the PRE-edit text around the pending edit touched a registered
+    /// extension block fence — captured in shouldChangeTextIn so a DELETED
+    /// fence still forces the full restyle in textDidChange.
+    var pendingExtFenceTouched = false
+    /// Set when the storage mutated without the census bookkeeping seeing it
+    /// (IME composition) — forces the next census back to a full scan.
+    var backtickCensusNeedsRescan = false
+    /// DEBUG-only sampling counter for verifying the incremental census.
+    var backtickVerifyCounter: UInt = 0
+    /// Incremental parse state for this editor (buffer + blocks + tokens
+    /// evolve together under the edit descriptor).
+    let parseState = DocumentParseState()
+    /// Monotonic stamp for fresh ParsedDocument builds (see ParsedDocument.version).
+    var parsedDocumentVersion: UInt64 = 0
+    /// Single-slot memo for computeActiveTokenIndices — it runs up to three
+    /// times per keystroke on identical inputs (pre-edit ask, selection
+    /// change, textDidChange). Pure function of (version, selection, suppressed).
+    var activeTokenMemo: (version: UInt64, selection: NSRange, suppressed: Bool, result: Set<Int>)?
+
+    /// Display-text length after the previous textDidChange — yields the edit's
+    /// length delta without retaining the previous text.
+    var previousDisplayLength: Int = -1
+    /// Storage form computed by the previous wiki sync, kept synchronously
+    /// (unlike `lastSyncedText`, which updates via async dispatch and can lag a
+    /// keystroke). This is the splice base for the incremental path.
+    var lastComputedStorage: String = ""
+    /// DEBUG-only sampling counter for verifying splices against full rebuilds.
+    var wikiVerifyCounter: UInt = 0
 
     var pendingEditedRange: NSRange? = nil
+    /// Proposed-edit cycles since the last completed textDidChange. Exactly 1
+    /// means the hoisted editedRange/lengthDelta describe a single tracked
+    /// edit and incremental fast paths may trust them.
+    var pendingEditCount = 0
+#if DEBUG
+    /// Diagnostic: whether the last completed textDidChange ran with a
+    /// trusted single-edit descriptor (fast paths). Read by tests.
+    var debugLastEditWasTrusted: Bool? = nil
+#endif
     var pendingPreEditActiveTokenIndices: Set<Int>? = nil
     var previousCaretLocation: Int? = nil
+    /// Full previous selection — selection-revealed task syntax needs to know
+    /// when the selection SPAN changed, not just its location (shift-extends
+    /// keep the anchor put while newly covering lines).
+    var previousSelectedRange: NSRange? = nil
     /// Drag-select suppressed a restyle; replayed on the next non-drag selection change.
     var needsRestyleAfterDrag = false
 
     var cachedCodeBlockTokens: [(index: Int, token: MarkdownToken)] = []
+    /// Dedupe key of the last emitted code-block selections — identical
+    /// (parse version, scroll, width, active-code set) means identical output,
+    /// so the second per-keystroke invocation can skip the geometry work.
+    var lastCodeSelKey: (UInt64, CGFloat, CGFloat, Set<Int>)?
     var cachedParsedText: String?
     var cachedParsedDocument: ParsedDocument?
+    /// Monotonic edit counter: bumped whenever the text storage can have
+    /// changed. Lets `parsedDocument` return cache hits in O(1) instead of an
+    /// O(doc) string compare. Any code that mutates the storage directly
+    /// (bypassing shouldChangeText/textDidChange) must bump this.
+    var parseGeneration: UInt64 = 0
+    var cachedParseGeneration: UInt64 = .max
+    var cachedParsedLength: Int = -1
     // Skip spellcheck property setters when the state wouldn't change.
     var cachedSpellingDisabled: Bool?
 
@@ -135,11 +198,28 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
 
     struct ParsedDocument {
         let tokens: [MarkdownToken]
+        /// The block list the tokens were derived from — handed to the restyle
+        /// so DocumentAST.parse consumes it instead of re-deriving blocks
+        /// (full buffer re-extraction + memcmp per keystroke).
+        let blocks: [Block]
         let codeTokens: [MarkdownToken]
         let latexTokens: [MarkdownToken]
         let blockLatexTokens: [MarkdownToken]
         let wikiLinkTokens: [MarkdownToken]
         let imageEmbedTokens: [MarkdownToken]
+        let tableTokens: [MarkdownToken]
+        /// Code-block tokens with their index into `tokens` (active-token
+        /// checks need the original index) — collected in the same single
+        /// classification pass instead of a per-call full-token filter.
+        let codeBlockTokensWithIndices: [(index: Int, token: MarkdownToken)]
+        /// Per-kind indexed token arrays for the styler's NSImage passes, built
+        /// in the same single classification pass so the passes iterate small
+        /// scope-sliced arrays instead of walking every document token.
+        let classified: MarkdownStyler.ClassifiedStyleTokens
+        /// Bumped only when a FRESH parse builds this document — cache-hit
+        /// returns share the version, so (version, selection, suppressed) is
+        /// an exact memo key for pure derivations like active-token indices.
+        let version: UInt64
     }
 
     enum InlineTokenContext {
@@ -317,6 +397,16 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
         if let name = bus.findQuery {
             busObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 self?.handleFindQuery(notification)
+            })
+        }
+        if let name = bus.replaceCurrent {
+            busObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                self?.handleReplaceCurrent(notification)
+            })
+        }
+        if let name = bus.replaceAll {
+            busObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                self?.handleReplaceAll(notification)
             })
         }
     }

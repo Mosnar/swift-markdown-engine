@@ -61,7 +61,9 @@ enum AutomaticLinkService {
                 for item in items {
                     appendPlainRanges(from: item.inlines, into: &ranges)
                 }
-            case .codeBlock, .blockLatex, .table, .thematicBreak, .blank:
+            // Extension blocks are fence-delimited like code blocks, so their
+            // content stays literal — the extension owns what its fences mean.
+            case .codeBlock, .blockLatex, .table, .thematicBreak, .blank, .ext:
                 break
             }
         }
@@ -73,10 +75,12 @@ enum AutomaticLinkService {
             switch node {
             case .text(let range):
                 ranges.append(range)
-            case .emphasis(_, _, _, let children),
-                 .strikethrough(_, _, let children),
-                 .highlight(_, _, let children):
+            case .emphasis(_, _, _, let children):
                 appendPlainRanges(from: children, into: &ranges)
+            // Strikethrough and highlight are extension-contributed spans now.
+            // Opaque extensions carry no children, so this is a no-op for them.
+            case .ext(let node):
+                appendPlainRanges(from: node.children, into: &ranges)
             case .code, .link, .image, .wikiLink, .imageEmbed, .inlineLatex, .escape:
                 break
             }

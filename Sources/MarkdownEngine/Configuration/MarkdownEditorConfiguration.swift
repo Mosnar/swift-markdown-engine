@@ -32,11 +32,11 @@ public struct MarkdownEditorConfiguration: Sendable {
     public var codeBlock: CodeBlockStyle
     public var inlineCode: InlineCodeStyle
     public var lists: ListStyle
+    public var taskCheckbox: TaskCheckboxStyle
     public var headings: HeadingStyle
     public var imageEmbed: ImageEmbedStyle
     public var blockLatex: BlockLatexStyle
     public var inlineLatex: InlineLatexStyle
-    public var checkbox: CheckboxStyle
     public var blockquote: BlockquoteStyle
     public var link: LinkStyle
     public var paragraph: ParagraphStyle
@@ -64,6 +64,16 @@ public struct MarkdownEditorConfiguration: Sendable {
     ///
     /// - SeeAlso: ``HeightBehavior``
     public var heightBehavior: HeightBehavior
+    /// Present the document as raw Markdown source: no syntax hiding, no
+    /// styling, no wiki-link display transform (`[[Name|UUID]]` shows verbatim).
+    /// Stays editable, but smart input (list continuation, auto-wrap, ⇧⇥) is off.
+    /// Runtime-switchable; a flip rebuilds immediately and drops the document's
+    /// undo stack (actions from the other mode would replay at stale ranges).
+    public var rawSourceMode: Bool
+    /// Opt-in constructs beyond pure markdown (e.g. `==highlight==`). Empty by
+    /// default: unregistered syntax stays literal text. Order defines match
+    /// precedence among extensions; built-in constructs always win first.
+    public var extensions: [any MarkdownExtension]
 
     public init(
         theme: MarkdownEditorTheme = .default,
@@ -72,11 +82,11 @@ public struct MarkdownEditorConfiguration: Sendable {
         codeBlock: CodeBlockStyle = .default,
         inlineCode: InlineCodeStyle = .default,
         lists: ListStyle = .default,
+        taskCheckbox: TaskCheckboxStyle = .default,
         headings: HeadingStyle = .default,
         imageEmbed: ImageEmbedStyle = .default,
         blockLatex: BlockLatexStyle = .default,
         inlineLatex: InlineLatexStyle = .default,
-        checkbox: CheckboxStyle = .default,
         blockquote: BlockquoteStyle = .default,
         link: LinkStyle = .default,
         paragraph: ParagraphStyle = .default,
@@ -87,7 +97,9 @@ public struct MarkdownEditorConfiguration: Sendable {
         textInsets: TextInsets = .default,
         readingWidth: CGFloat? = nil,
         spellChecking: SpellCheckingPolicy = .default,
-        heightBehavior: HeightBehavior = .scrolls
+        heightBehavior: HeightBehavior = .scrolls,
+        rawSourceMode: Bool = false,
+        extensions: [any MarkdownExtension] = []
     ) {
         self.theme = theme
         self.services = services
@@ -95,11 +107,11 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.codeBlock = codeBlock
         self.inlineCode = inlineCode
         self.lists = lists
+        self.taskCheckbox = taskCheckbox
         self.headings = headings
         self.imageEmbed = imageEmbed
         self.blockLatex = blockLatex
         self.inlineLatex = inlineLatex
-        self.checkbox = checkbox
         self.blockquote = blockquote
         self.link = link
         self.paragraph = paragraph
@@ -111,6 +123,8 @@ public struct MarkdownEditorConfiguration: Sendable {
         self.readingWidth = readingWidth
         self.spellChecking = spellChecking
         self.heightBehavior = heightBehavior
+        self.rawSourceMode = rawSourceMode
+        self.extensions = extensions
     }
 
     public static let `default` = MarkdownEditorConfiguration()
@@ -291,6 +305,33 @@ public struct ListStyle: Sendable {
     public static let `default` = ListStyle()
 }
 
+// MARK: - Task checkboxes
+
+/// SF Symbol names used to draw task-list checkboxes (`- [ ]` / `- [x]`).
+///
+/// Any SF Symbol available on the deployment target can be substituted, for
+/// example `"circle"` / `"checkmark.circle.fill"`. A name that doesn't
+/// resolve falls back to the corresponding default symbol at draw time, so a
+/// typo degrades to the stock look instead of drawing nothing. Tint colors
+/// stay theme-driven (`MarkdownEditorTheme/mutedText` unchecked,
+/// `MarkdownEditorTheme/bodyText` checked).
+public struct TaskCheckboxStyle: Sendable {
+    /// SF Symbol drawn for an unchecked task item (`[ ]`).
+    public var uncheckedSymbolName: String
+    /// SF Symbol drawn for a checked task item (`[x]`).
+    public var checkedSymbolName: String
+
+    public init(
+        uncheckedSymbolName: String = "square",
+        checkedSymbolName: String = "checkmark.square.fill"
+    ) {
+        self.uncheckedSymbolName = uncheckedSymbolName
+        self.checkedSymbolName = checkedSymbolName
+    }
+
+    public static let `default` = TaskCheckboxStyle()
+}
+
 // MARK: - Headings
 
 /// Per-level heading metrics. Defaults follow the historical Nodes ratios,
@@ -388,39 +429,6 @@ public struct InlineLatexStyle: Sendable {
     public init() { self.placeholder = () }
 
     public static let `default` = InlineLatexStyle()
-}
-
-// MARK: - Task checkboxes
-
-/// Glyph sizing and spacing for `- [ ]` / `- [x]` task checkboxes.
-public struct CheckboxStyle: Sendable {
-    /// Minimum extra spacing (points) inserted after an unchecked checkbox to
-    /// optically center the rendered glyph.
-    public var minimumExtraSpacing: CGFloat
-    /// Additional spacing as a fraction of the surrounding font's point size.
-    public var extraSpacingPerFontPointFraction: CGFloat
-    /// Checkbox glyph size as a fraction of the line's font height.
-    public var sizeFromFontHeightFactor: CGFloat
-    /// Checkbox glyph size as a fraction of the `[ ]` marker width.
-    public var sizeFromMarkerWidthFactor: CGFloat
-    /// Inset applied inside the checkbox bounding box before drawing the icon.
-    public var iconInsetFraction: CGFloat
-
-    public init(
-        minimumExtraSpacing: CGFloat = 2.0,
-        extraSpacingPerFontPointFraction: CGFloat = 0.18,
-        sizeFromFontHeightFactor: CGFloat = 1.2,
-        sizeFromMarkerWidthFactor: CGFloat = 1.2,
-        iconInsetFraction: CGFloat = 0.01
-    ) {
-        self.minimumExtraSpacing = minimumExtraSpacing
-        self.extraSpacingPerFontPointFraction = extraSpacingPerFontPointFraction
-        self.sizeFromFontHeightFactor = sizeFromFontHeightFactor
-        self.sizeFromMarkerWidthFactor = sizeFromMarkerWidthFactor
-        self.iconInsetFraction = iconInsetFraction
-    }
-
-    public static let `default` = CheckboxStyle()
 }
 
 // MARK: - Blockquote
