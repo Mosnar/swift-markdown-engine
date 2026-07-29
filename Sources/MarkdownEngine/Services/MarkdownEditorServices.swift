@@ -249,7 +249,7 @@ public struct NoOpLatexRenderer: LatexRenderer {
 /// The engine observes the request notifications it is configured with and
 /// posts the response notifications when supplied. Embedders that don't
 /// need cross-view formatting commands simply leave every name `nil`.
-public struct MarkdownEditorBus: Sendable {
+public struct MarkdownEditorBus: Sendable, Equatable {
     /// Posted by the host UI to request the engine apply bold styling.
     public var applyBoldRequest: Notification.Name?
     /// Posted by the host UI to request the engine apply italic styling.

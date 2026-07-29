@@ -186,6 +186,39 @@ struct FindFocusDocumentTests {
         #expect(rects["doc-b"] ?? nil == nil)
     }
 
+    /// The rest of these call `handleFindQuery` directly; this one goes through
+    /// NotificationCenter so the bus subscription itself is covered — assigning
+    /// `coordinator.configuration` is what installs those observers.
+    @Test("A query posted on the bus reaches the coordinator")
+    func postedQueryReachesTheCoordinator() async {
+        let editor = makeEditor(documentId: "doc-posted", text: "alpha beta alpha")
+        var count: Int?
+        let observer = NotificationCenter.default.addObserver(
+            forName: Self.resultsName,
+            object: nil,
+            queue: nil
+        ) { note in
+            guard note.userInfo?["documentId"] as? String == "doc-posted" else { return }
+            count = note.userInfo?["count"] as? Int
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        NotificationCenter.default.post(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-posted"]
+        )
+        // Bus observers are registered on the main queue, so delivery is a hop away.
+        for _ in 0..<3 {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+
+        #expect(count == 2)
+        _ = editor
+    }
+
     @Test("A query matching nothing reports zero for the document")
     func noMatchesReportsZero() {
         let editor = makeEditor(documentId: "doc-a", text: "alpha beta")

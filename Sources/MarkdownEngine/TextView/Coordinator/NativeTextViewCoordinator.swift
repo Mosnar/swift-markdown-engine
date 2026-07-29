@@ -38,7 +38,14 @@ public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
     var fontSize: CGFloat
     var configuration: MarkdownEditorConfiguration = .default {
         didSet {
-            subscribeToBusNotifications(replacing: oldValue.services.bus)
+            // `updateNSView` reassigns the configuration on every SwiftUI
+            // update, so only re-subscribe when the names actually changed.
+            // Otherwise a host that sets any bus names pays a full teardown and
+            // re-add of every observer on each update, and a bus configured once
+            // at setup — the usual case — never needs re-subscribing at all.
+            if oldValue.services.bus != configuration.services.bus {
+                subscribeToBusNotifications(replacing: oldValue.services.bus)
+            }
             subscribeToAppearanceNotification()
             // Precompiled registry for the per-keystroke parse path — deriving
             // it from the configuration on every keystroke would rebuild the

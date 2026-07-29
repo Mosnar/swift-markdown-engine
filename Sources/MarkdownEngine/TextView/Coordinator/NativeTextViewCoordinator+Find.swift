@@ -185,20 +185,23 @@ extension NativeTextViewCoordinator {
         let storage = tv.textStorage
         let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
 
-        // Clear previous highlights
-        storage?.removeAttribute(.backgroundColor, range: fullRange)
-
         // Highlight all matches; the focused match gets a stronger color.
         let theme = configuration.theme
         let matchAlpha = configuration.markers.findMatchHighlightAlpha
         let highlightColor = theme.findMatchHighlight.withAlphaComponent(matchAlpha)
         let currentHighlightColor = theme.findCurrentMatchHighlight
 
+        // One editing group: each attribute write is an edit that invalidates
+        // layout on its own, so a query matching many times in a long document
+        // would otherwise invalidate once per match, on every keystroke.
+        storage?.beginEditing()
+        storage?.removeAttribute(.backgroundColor, range: fullRange)
         for (i, matchRange) in allRanges.enumerated() {
             guard matchRange.location + matchRange.length <= fullRange.length else { continue }
             let color = (i == currentIndex) ? currentHighlightColor : highlightColor
             storage?.addAttribute(.backgroundColor, value: color, range: matchRange)
         }
+        storage?.endEditing()
 
         if let tlm = tv.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
