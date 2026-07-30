@@ -71,10 +71,6 @@ extension NativeTextViewCoordinator {
     public func textDidChange(_ notification: Notification) {
         guard let tv = notification.object as? NSTextView else { return }
         PerfTrace.checkpoint("didIn")
-        // Editing shifts offsets and the restyle re-applies the styler's own
-        // backgrounds, so any find snapshot describes text that no longer
-        // exists. The next find render re-captures it.
-        findPreservedBackgrounds = nil
         // Before the early returns: the first keystroke must hide the placeholder.
         (tv as? NativeTextView)?.refreshPlaceholderVisibility()
         // Raw mode: display IS storage — sync the binding, skip the restyle.

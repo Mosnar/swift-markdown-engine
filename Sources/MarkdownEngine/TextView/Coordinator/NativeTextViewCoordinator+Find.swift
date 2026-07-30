@@ -13,6 +13,20 @@
 
 import AppKit
 
+extension NSAttributedString.Key {
+    /// Marks a range find painted a highlight over, carrying whatever
+    /// `.backgroundColor` was there beforehand so it can be put back exactly.
+    /// The value is the prior `NSColor`, or `NSNull` when the range had none.
+    ///
+    /// Find can't just clear `.backgroundColor` when it's done: the styler draws
+    /// inline code, fenced blocks and code in tables with that same attribute.
+    /// And it can't snapshot the whole document either, because restyling is
+    /// paragraph-scoped — an edit re-styles only the touched paragraphs, so a
+    /// document-wide snapshot taken afterwards would capture find's own leftover
+    /// colors elsewhere and mistake them for the styler's.
+    static let markdownFindHighlight = NSAttributedString.Key("markdownFindHighlight")
+}
+
 extension NativeTextViewCoordinator {
     /// Legacy path: the host computes match ranges and posts them. Kept for compatibility, but
     /// it trusts SOURCE-coordinate ranges, which misalign wherever the displayed text is shorter
@@ -66,32 +80,72 @@ extension NativeTextViewCoordinator {
         postFindResults(count: allRanges.count, query: query, matchRect: matchRect)
     }
 
-    /// The `.backgroundColor` runs currently in the storage — the styler's, since
-    /// this is only called before find has painted anything.
-    private func preservedBackgrounds(
-        in storage: NSTextStorage?,
-        range: NSRange
-    ) -> [(range: NSRange, color: NSColor)] {
-        guard let storage, range.length > 0 else { return [] }
-        var runs: [(range: NSRange, color: NSColor)] = []
-        storage.enumerateAttribute(.backgroundColor, in: range) { value, subrange, _ in
-            if let color = value as? NSColor {
-                runs.append((subrange, color))
+    /// Whether find currently has any highlight applied in this document.
+    func hasFindHighlights(in storage: NSTextStorage?) -> Bool {
+        guard let storage, storage.length > 0 else { return false }
+        var found = false
+        storage.enumerateAttribute(
+            .markdownFindHighlight,
+            in: NSRange(location: 0, length: storage.length)
+        ) { value, _, stop in
+            if value != nil {
+                found = true
+                stop.pointee = true
             }
         }
-        return runs
+        return found
     }
 
-    /// Clear every background, then put the styler's own back. Find highlights
-    /// are painted on top of the result.
-    private func restoreStylerBackgrounds(in storage: NSTextStorage?, fullRange: NSRange) {
-        guard let storage else { return }
-        storage.removeAttribute(.backgroundColor, range: fullRange)
-        for run in findPreservedBackgrounds ?? [] {
-            // Ranges are re-snapshotted whenever the text changes, but clamp
-            // anyway rather than risk an out-of-bounds write.
-            guard NSMaxRange(run.range) <= fullRange.length else { continue }
-            storage.addAttribute(.backgroundColor, value: run.color, range: run.range)
+    /// Undo every highlight find applied, restoring the exact background each
+    /// range had beforehand. Touches only ranges find marked, so the styler's
+    /// backgrounds elsewhere are left alone. Returns whether anything changed.
+    @discardableResult
+    func removeFindHighlights(from storage: NSTextStorage?, range: NSRange) -> Bool {
+        guard let storage, range.length > 0 else { return false }
+
+        // Collect first: mutating attributes mid-enumeration is not safe.
+        var marked: [(range: NSRange, priorColor: NSColor?)] = []
+        storage.enumerateAttribute(.markdownFindHighlight, in: range) { value, subrange, _ in
+            guard let value else { return }
+            marked.append((subrange, value as? NSColor))
+        }
+        guard !marked.isEmpty else { return false }
+
+        for entry in marked {
+            storage.removeAttribute(.markdownFindHighlight, range: entry.range)
+            if let priorColor = entry.priorColor {
+                storage.addAttribute(.backgroundColor, value: priorColor, range: entry.range)
+            } else {
+                storage.removeAttribute(.backgroundColor, range: entry.range)
+            }
+        }
+        return true
+    }
+
+    /// Paint `allRanges`, recording what each range's background was so
+    /// `removeFindHighlights` can restore it. A match straddling a code span
+    /// records the prior background run by run, so each part comes back right.
+    private func applyFindHighlights(
+        _ allRanges: [NSRange],
+        currentIndex: Int?,
+        in storage: NSTextStorage,
+        fullRange: NSRange,
+        matchColor: NSColor,
+        currentMatchColor: NSColor
+    ) {
+        for (i, matchRange) in allRanges.enumerated() {
+            guard NSMaxRange(matchRange) <= fullRange.length else { continue }
+
+            var priors: [(range: NSRange, value: Any)] = []
+            storage.enumerateAttribute(.backgroundColor, in: matchRange) { value, subrange, _ in
+                priors.append((subrange, (value as? NSColor) ?? NSNull()))
+            }
+            for prior in priors {
+                storage.addAttribute(.markdownFindHighlight, value: prior.value, range: prior.range)
+            }
+
+            let color = (i == currentIndex) ? currentMatchColor : matchColor
+            storage.addAttribute(.backgroundColor, value: color, range: matchRange)
         }
     }
 
@@ -220,21 +274,22 @@ extension NativeTextViewCoordinator {
         let highlightColor = theme.findMatchHighlight.withAlphaComponent(matchAlpha)
         let currentHighlightColor = theme.findCurrentMatchHighlight
 
-        // Capture the styler's own backgrounds the first time find paints over
-        // them, so they can be restored on every re-render and on clear.
-        if findPreservedBackgrounds == nil {
-            findPreservedBackgrounds = preservedBackgrounds(in: storage, range: fullRange)
-        }
-
         // One editing group: each attribute write is an edit that invalidates
         // layout on its own, so a query matching many times in a long document
         // would otherwise invalidate once per match, on every keystroke.
         storage?.beginEditing()
-        restoreStylerBackgrounds(in: storage, fullRange: fullRange)
-        for (i, matchRange) in allRanges.enumerated() {
-            guard matchRange.location + matchRange.length <= fullRange.length else { continue }
-            let color = (i == currentIndex) ? currentHighlightColor : highlightColor
-            storage?.addAttribute(.backgroundColor, value: color, range: matchRange)
+        // Undo the previous render's highlights before painting this one, which
+        // also sweeps up any left in paragraphs an edit didn't restyle.
+        removeFindHighlights(from: storage, range: fullRange)
+        if let storage {
+            applyFindHighlights(
+                allRanges,
+                currentIndex: currentIndex,
+                in: storage,
+                fullRange: fullRange,
+                matchColor: highlightColor,
+                currentMatchColor: currentHighlightColor
+            )
         }
         storage?.endEditing()
 
@@ -282,6 +337,12 @@ extension NativeTextViewCoordinator {
 
     @objc func handleFindClearHighlights(_ notification: Notification) {
         guard let tv = textView else { return }
+        // Nothing to undo means nothing to do. Without this, opening find and
+        // dismissing it before typing would run the restore path over a document
+        // find never touched, and the scroll-anchor bookkeeping below would move
+        // the view for no reason.
+        guard hasFindHighlights(in: tv.textStorage) else { return }
+
         let scrollView = tv.enclosingScrollView
         let preY = scrollView?.contentView.bounds.origin.y ?? 0
         let insetsTop = scrollView?.contentInsets.top ?? 0
@@ -302,14 +363,13 @@ extension NativeTextViewCoordinator {
             }
         }
 
-        // Put the styler's backgrounds back rather than leaving the document
-        // stripped: inline code, fenced blocks and code in tables all use
-        // `.backgroundColor`, so a blanket removal outlives the search.
+        // Restore what find overwrote rather than clearing `.backgroundColor`
+        // wholesale: inline code, fenced blocks and code in tables are drawn
+        // with that same attribute, so a blanket removal outlives the search.
         let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
         tv.textStorage?.beginEditing()
-        restoreStylerBackgrounds(in: tv.textStorage, fullRange: fullRange)
+        removeFindHighlights(from: tv.textStorage, range: fullRange)
         tv.textStorage?.endEditing()
-        findPreservedBackgrounds = nil
         if let tlm = tv.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
         }

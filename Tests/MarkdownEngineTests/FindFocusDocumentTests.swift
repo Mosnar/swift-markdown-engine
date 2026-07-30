@@ -276,6 +276,53 @@ struct FindFocusDocumentTests {
         #expect(backgroundColors(in: editor.textView) == [codeBackground])
     }
 
+    @Test("Clearing without ever having searched leaves the document untouched")
+    func clearingWithoutSearchingIsANoOp() {
+        let editor = makeEditor(documentId: "doc-a", text: "alpha `code` alpha")
+        let storage = editor.textView.textStorage!
+        let codeRange = (editor.textView.string as NSString).range(of: "`code`")
+        storage.addAttribute(.backgroundColor, value: NSColor.systemGray, range: codeRange)
+
+        // Open-then-dismiss before typing: the host posts clearHighlights even
+        // though no query ever ran.
+        editor.coordinator.handleFindClearHighlights(Notification(
+            name: Notification.Name("test.find.clear"),
+            object: nil
+        ))
+
+        #expect(backgroundColors(in: editor.textView) == [NSColor.systemGray])
+    }
+
+    @Test("Highlights left in unrestyled paragraphs are not mistaken for styling")
+    func staleHighlightsAreNotAdoptedAsStyling() {
+        // Two paragraphs; an edit restyles only the one it touches, so find's
+        // highlight survives in the other and must still be removable.
+        let editor = makeEditor(documentId: "doc-a", text: "alpha one\n\nalpha two")
+        let storage = editor.textView.textStorage!
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-a"]
+        ))
+        #expect(backgroundColors(in: editor.textView).count == 2)
+
+        // Stand in for a paragraph-scoped restyle of the first paragraph only:
+        // it rewrites attributes there, dropping both the highlight and its
+        // marker, and leaves the second paragraph as find left it.
+        let firstParagraph = NSRange(location: 0, length: 9)
+        storage.removeAttribute(.backgroundColor, range: firstParagraph)
+        storage.removeAttribute(.markdownFindHighlight, range: firstParagraph)
+
+        editor.coordinator.handleFindClearHighlights(Notification(
+            name: Notification.Name("test.find.clear"),
+            object: nil
+        ))
+
+        // The surviving highlight is gone rather than adopted as permanent styling.
+        #expect(backgroundColors(in: editor.textView).isEmpty)
+    }
+
     @Test("A match overlapping code returns the code background after clearing")
     func matchInsideCodeRestoresBackground() {
         let editor = makeEditor(documentId: "doc-a", text: "see `alpha` here")
