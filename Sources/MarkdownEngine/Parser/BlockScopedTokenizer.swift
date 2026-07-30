@@ -107,7 +107,7 @@ extension MarkdownTokenizer {
             let m = (lo + hi) / 2
             if NSMaxRange(blocks[m].range) >= changeStart { hi = m } else { lo = m + 1 }
         }
-        var first = lo
+        let first = lo
         lo = 0; hi = blocks.count - 1
         while lo < hi {                       // last block starting <= changeEndNew
             let m = (lo + hi + 1) / 2

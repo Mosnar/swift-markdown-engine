@@ -24,7 +24,9 @@ extension NativeTextViewWrapper.Coordinator {
         // with a title fallback.
         if let fontIndex = menu.items.firstIndex(where: { item in
             if item.title == "Font" { return true }
-            return item.submenu?.items.contains { $0.action == Selector("orderFrontFontPanel:") } ?? false
+            return item.submenu?.items.contains {
+                $0.action == #selector(NSFontManager.orderFrontFontPanel(_:))
+            } ?? false
         }) {
             menu.removeItem(at: fontIndex)
         }
