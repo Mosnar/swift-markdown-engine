@@ -219,6 +219,83 @@ struct FindFocusDocumentTests {
         _ = editor
     }
 
+    // MARK: - Preserving the styler's backgrounds
+
+    /// Inline code, fenced blocks and code in tables are all drawn with
+    /// `.backgroundColor`, the same attribute find highlights with, so find must
+    /// restore them rather than leave the document stripped.
+    @Test("Searching preserves the styler's own backgrounds and clearing restores them")
+    func stylerBackgroundsSurviveFind() {
+        let editor = makeEditor(documentId: "doc-a", text: "alpha `code` alpha")
+        let storage = editor.textView.textStorage!
+        let fullRange = NSRange(location: 0, length: storage.length)
+
+        // Stand in for the styler: a background the find code did not apply.
+        let codeRange = (editor.textView.string as NSString).range(of: "`code`")
+        let codeBackground = NSColor.systemGray
+        storage.addAttribute(.backgroundColor, value: codeBackground, range: codeRange)
+
+        func codeBackgroundIsIntact() -> Bool {
+            var effective = NSRange(location: 0, length: 0)
+            let value = storage.attribute(
+                .backgroundColor,
+                at: codeRange.location,
+                longestEffectiveRange: &effective,
+                in: fullRange
+            )
+            return (value as? NSColor) == codeBackground
+        }
+
+        #expect(codeBackgroundIsIntact())
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-a"]
+        ))
+
+        // Matches are highlighted, and the code background is untouched.
+        #expect(backgroundColors(in: editor.textView).contains(codeBackground))
+        #expect(codeBackgroundIsIntact())
+
+        // Re-running with a different query must not accumulate or drop it.
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "lph", "currentIndex": 0, "focusDocumentId": "doc-a"]
+        ))
+        #expect(codeBackgroundIsIntact())
+
+        editor.coordinator.handleFindClearHighlights(Notification(
+            name: Notification.Name("test.find.clear"),
+            object: nil
+        ))
+
+        // Done leaves exactly the styler's background behind.
+        #expect(codeBackgroundIsIntact())
+        #expect(backgroundColors(in: editor.textView) == [codeBackground])
+    }
+
+    @Test("A match overlapping code returns the code background after clearing")
+    func matchInsideCodeRestoresBackground() {
+        let editor = makeEditor(documentId: "doc-a", text: "see `alpha` here")
+        let storage = editor.textView.textStorage!
+        let codeRange = (editor.textView.string as NSString).range(of: "`alpha`")
+        storage.addAttribute(.backgroundColor, value: NSColor.systemGray, range: codeRange)
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-a"]
+        ))
+        editor.coordinator.handleFindClearHighlights(Notification(
+            name: Notification.Name("test.find.clear"),
+            object: nil
+        ))
+
+        #expect(backgroundColors(in: editor.textView) == [NSColor.systemGray])
+    }
+
     @Test("A query matching nothing reports zero for the document")
     func noMatchesReportsZero() {
         let editor = makeEditor(documentId: "doc-a", text: "alpha beta")

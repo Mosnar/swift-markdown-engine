@@ -18,7 +18,19 @@ import SwiftUI
 /// in extensions (Autocorrect, CodeBlocks, Find, InlineSelection,
 /// Notifications, Restyling, TextDelegate, WritingTools).
 public final class NativeTextViewCoordinator: NSObject, NSTextViewDelegate {
-    var documentId: String?
+    var documentId: String? {
+        didSet {
+            guard oldValue != documentId else { return }
+            // The snapshot describes the outgoing document's text.
+            findPreservedBackgrounds = nil
+        }
+    }
+    /// Background colors the styler had applied before find started painting
+    /// over `.backgroundColor` — inline code, fenced blocks and code in tables
+    /// all use that attribute, so find has to put them back rather than leave
+    /// the document stripped. `nil` means "no find highlights applied, so the
+    /// storage's current backgrounds are the styler's own".
+    var findPreservedBackgrounds: [(range: NSRange, color: NSColor)]?
     /// Remembered scroll offset (`bounds.origin.y`) per `documentId` — saved on
     /// switch-away, restored on switch-back.
     var scrollOffsets: [String: CGFloat] = [:]

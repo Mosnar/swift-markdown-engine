@@ -66,6 +66,35 @@ extension NativeTextViewCoordinator {
         postFindResults(count: allRanges.count, query: query, matchRect: matchRect)
     }
 
+    /// The `.backgroundColor` runs currently in the storage — the styler's, since
+    /// this is only called before find has painted anything.
+    private func preservedBackgrounds(
+        in storage: NSTextStorage?,
+        range: NSRange
+    ) -> [(range: NSRange, color: NSColor)] {
+        guard let storage, range.length > 0 else { return [] }
+        var runs: [(range: NSRange, color: NSColor)] = []
+        storage.enumerateAttribute(.backgroundColor, in: range) { value, subrange, _ in
+            if let color = value as? NSColor {
+                runs.append((subrange, color))
+            }
+        }
+        return runs
+    }
+
+    /// Clear every background, then put the styler's own back. Find highlights
+    /// are painted on top of the result.
+    private func restoreStylerBackgrounds(in storage: NSTextStorage?, fullRange: NSRange) {
+        guard let storage else { return }
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+        for run in findPreservedBackgrounds ?? [] {
+            // Ranges are re-snapshotted whenever the text changes, but clamp
+            // anyway rather than risk an out-of-bounds write.
+            guard NSMaxRange(run.range) <= fullRange.length else { continue }
+            storage.addAttribute(.backgroundColor, value: run.color, range: run.range)
+        }
+    }
+
     /// All ranges of `query` in `haystack` (display coordinates), case- and
     /// diacritic-insensitive. Shared by find and replace.
     func findMatches(of query: String, in haystack: NSString) -> [NSRange] {
@@ -191,11 +220,17 @@ extension NativeTextViewCoordinator {
         let highlightColor = theme.findMatchHighlight.withAlphaComponent(matchAlpha)
         let currentHighlightColor = theme.findCurrentMatchHighlight
 
+        // Capture the styler's own backgrounds the first time find paints over
+        // them, so they can be restored on every re-render and on clear.
+        if findPreservedBackgrounds == nil {
+            findPreservedBackgrounds = preservedBackgrounds(in: storage, range: fullRange)
+        }
+
         // One editing group: each attribute write is an edit that invalidates
         // layout on its own, so a query matching many times in a long document
         // would otherwise invalidate once per match, on every keystroke.
         storage?.beginEditing()
-        storage?.removeAttribute(.backgroundColor, range: fullRange)
+        restoreStylerBackgrounds(in: storage, fullRange: fullRange)
         for (i, matchRange) in allRanges.enumerated() {
             guard matchRange.location + matchRange.length <= fullRange.length else { continue }
             let color = (i == currentIndex) ? currentHighlightColor : highlightColor
@@ -267,8 +302,14 @@ extension NativeTextViewCoordinator {
             }
         }
 
+        // Put the styler's backgrounds back rather than leaving the document
+        // stripped: inline code, fenced blocks and code in tables all use
+        // `.backgroundColor`, so a blanket removal outlives the search.
         let fullRange = NSRange(location: 0, length: (tv.string as NSString).length)
-        tv.textStorage?.removeAttribute(.backgroundColor, range: fullRange)
+        tv.textStorage?.beginEditing()
+        restoreStylerBackgrounds(in: tv.textStorage, fullRange: fullRange)
+        tv.textStorage?.endEditing()
+        findPreservedBackgrounds = nil
         if let tlm = tv.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
         }
