@@ -64,10 +64,16 @@ extension NativeTextViewCoordinator {
             return min(max(requestedIndex, 0), allRanges.count - 1)
         }()
 
+        // Only a document that has to report geometry — or scroll itself on the
+        // single-document path — needs its layout brought up to date. Skipping it
+        // for the others saves a full-document layout pass per keystroke per
+        // document, which is what a fan-out host pays most for.
+        let needsGeometry = !hostDrivenFocus || currentIndex != nil
         renderFindMatches(
             allRanges,
             currentIndex: currentIndex,
-            scrollsToCurrentMatch: !hostDrivenFocus
+            scrollsToCurrentMatch: !hostDrivenFocus,
+            ensuresLayout: needsGeometry
         )
 
         var matchRect: CGRect?
@@ -77,7 +83,12 @@ extension NativeTextViewCoordinator {
                 using: layoutBridge
             )
         }
-        postFindResults(count: allRanges.count, query: query, matchRect: matchRect)
+        postFindResults(
+            count: allRanges.count,
+            query: query,
+            matchRect: matchRect,
+            requestToken: info["requestToken"]
+        )
     }
 
     /// Whether find currently has any highlight applied in this document.
@@ -172,7 +183,16 @@ extension NativeTextViewCoordinator {
     ///     main-queue hop later, so stale ones do arrive.
     ///   - matchRect: the focused match in the wrapper's top-leading coordinate
     ///     space, for hosts that scroll the match into view themselves.
-    private func postFindResults(count: Int, query: String? = nil, matchRect: CGRect? = nil) {
+    ///   - requestToken: echoed verbatim from the query. A host that reissues the
+    ///     same query text (after an edit, or against a different document set
+    ///     that happens to use the same document IDs) cannot otherwise tell a
+    ///     reply to the new request from a delayed reply to the old one.
+    private func postFindResults(
+        count: Int,
+        query: String? = nil,
+        matchRect: CGRect? = nil,
+        requestToken: Any? = nil
+    ) {
         guard let resultsName = configuration.services.bus.findResults else { return }
         var info: [AnyHashable: Any] = ["count": count]
         if let documentId {
@@ -183,6 +203,9 @@ extension NativeTextViewCoordinator {
         }
         if let matchRect {
             info["matchRect"] = matchRect
+        }
+        if let requestToken {
+            info["requestToken"] = requestToken
         }
         NotificationCenter.default.post(name: resultsName, object: nil, userInfo: info)
     }
@@ -259,10 +282,14 @@ extension NativeTextViewCoordinator {
     ///     without focusing any — what a document holds when a sibling document
     ///     owns the focus.
     ///   - scrollsToCurrentMatch: pass `false` when the host scrolls instead.
+    ///   - ensuresLayout: pass `false` when nothing will read this document's
+    ///     geometry. Background-color changes don't affect metrics, so the
+    ///     attribute edit alone is enough to get them drawn.
     private func renderFindMatches(
         _ allRanges: [NSRange],
         currentIndex: Int?,
-        scrollsToCurrentMatch: Bool = true
+        scrollsToCurrentMatch: Bool = true,
+        ensuresLayout: Bool = true
     ) {
         guard let tv = textView else { return }
         let storage = tv.textStorage
@@ -293,7 +320,7 @@ extension NativeTextViewCoordinator {
         }
         storage?.endEditing()
 
-        if let tlm = tv.textLayoutManager {
+        if ensuresLayout, let tlm = tv.textLayoutManager {
             tlm.ensureLayout(for: tlm.documentRange)
         }
 

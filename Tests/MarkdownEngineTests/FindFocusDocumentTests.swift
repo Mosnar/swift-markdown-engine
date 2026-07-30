@@ -276,6 +276,72 @@ struct FindFocusDocumentTests {
         #expect(backgroundColors(in: editor.textView) == [codeBackground])
     }
 
+    @Test("The request token is echoed back so a host can drop stale replies")
+    func requestTokenIsEchoed() {
+        let editor = makeEditor(documentId: "doc-a", text: "alpha alpha")
+        var received: [AnyHashable: Any]?
+        let observer = NotificationCenter.default.addObserver(
+            forName: Self.resultsName,
+            object: nil,
+            queue: nil
+        ) { note in
+            guard note.userInfo?["documentId"] as? String == "doc-a" else { return }
+            received = note.userInfo
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: [
+                "query": "alpha",
+                "currentIndex": 0,
+                "focusDocumentId": "doc-a",
+                "requestToken": 17
+            ]
+        ))
+
+        #expect(received?["requestToken"] as? Int == 17)
+    }
+
+    @Test("A query with no token reports none, leaving single-document hosts unchanged")
+    func absentRequestTokenIsNotInvented() {
+        let editor = makeEditor(documentId: "doc-a", text: "alpha")
+        var sawKey = true
+        let observer = NotificationCenter.default.addObserver(
+            forName: Self.resultsName,
+            object: nil,
+            queue: nil
+        ) { note in
+            guard note.userInfo?["documentId"] as? String == "doc-a" else { return }
+            sawKey = note.userInfo?["requestToken"] != nil
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0]
+        ))
+
+        #expect(sawKey == false)
+    }
+
+    @Test("An unfocused document still highlights every match without a layout pass")
+    func unfocusedDocumentStillHighlights() {
+        // The layout skip must not cost the highlight itself: background color
+        // doesn't affect metrics, so the attribute edit is enough.
+        let editor = makeEditor(documentId: "doc-b", text: "alpha alpha alpha")
+
+        editor.coordinator.handleFindQuery(Notification(
+            name: Self.queryName,
+            object: nil,
+            userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-a"]
+        ))
+
+        #expect(backgroundColors(in: editor.textView).count == 3)
+    }
+
     @Test("Clearing without ever having searched leaves the document untouched")
     func clearingWithoutSearchingIsANoOp() {
         let editor = makeEditor(documentId: "doc-a", text: "alpha `code` alpha")

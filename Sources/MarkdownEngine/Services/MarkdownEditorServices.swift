@@ -304,6 +304,12 @@ public struct MarkdownEditorBus: Sendable, Equatable {
     /// doesn't match still highlight all of their matches, but without a focused
     /// one, and no document scrolls itself: such a host owns the enclosing
     /// scroll view, so it scrolls using the `matchRect` from `findResults`.
+    ///
+    /// `userInfo["requestToken"]` is echoed back verbatim in `findResults`. A
+    /// host that reissues the same query text — after an edit, or against a
+    /// different document set that reuses the same document IDs — cannot
+    /// otherwise distinguish a reply to the new request from a delayed reply to
+    /// the old one.
     public var findQuery: Notification.Name?
     /// Posted by the engine in response to `findQuery` with `userInfo["count"] as? Int`
     /// (number of matches in the displayed text), so the host can show "x of y".
