@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-04
+
 ### Added
 - `SpellCheckingPolicy.automaticQuoteSubstitution` (default `true`, unchanged behavior) lets embedders editing raw Markdown/LaTeX source keep straight `'` and `"`; smart quotes were forced on at creation and re-enabled on every caret move out of a code/LaTeX/link span. The Smart Quotes menu toggle is now captured like the spelling toggles.
 - **Directive glyph presentation**: a self-contained call (`@marker`,
@@ -27,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is dynamic or too large to declare.
 
 ### Fixed
+- Nested lists keep their levels both ways: copied out as nested HTML/RTF
+  instead of one flat list, and read back from WebKit's sibling-sublist shape
+  (Mail, Notes) instead of dropping its items. Task boxes render with the list
+  helpers turned off.
 - A trackpad held against the top or bottom of the editor no longer flickers.
   AppKit applies a scroll on the next display refresh, after `scrollWheel(with:)`
   has returned, so the clamp there only ever corrected the PREVIOUS event — with
