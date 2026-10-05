@@ -7,6 +7,7 @@
 
 import AppKit
 import Foundation
+import CryptoKit
 import SwiftMath
 import MarkdownEngine
 
@@ -14,7 +15,7 @@ import MarkdownEngine
 ///
 /// Renders both block (`$$ … $$`) and inline (`$ … $`) LaTeX strings into
 /// `NSImage`s using the Latin Modern math font. Results are cached per
-/// (latex, font size, appearance, theme color fingerprint) so repeated
+/// (latex, mode, font size, appearance, theme color fingerprint) so repeated
 /// renders are free.
 ///
 /// Light/dark appearance is taken from the host editor's window
@@ -26,6 +27,7 @@ import MarkdownEngine
 public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
     private struct CacheKey: Hashable {
         let latex: String
+        let mode: LatexRenderMode
         let fontSize: CGFloat
         let isDarkMode: Bool
         let lightColorRGB: UInt32
@@ -42,6 +44,25 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
     private var cache: [CacheKey: CacheEntry] = [:]
     private let cacheLock = NSLock()
 
+    /// On-disk mirror of the render cache. The in-memory cache dies with the
+    /// process, so the ~450ms cold render of a formula-heavy note used to recur on
+    /// the FIRST open of every session. Persisting keeps it cold only on the very
+    /// first render ever (per formula); every later launch loads the PNG from disk
+    /// (~0.3ms) instead of typesetting (~2ms). Lives in the app's Caches dir, which
+    /// the OS may purge under pressure — a purge just re-renders, so it is safe.
+    private lazy var diskCacheDir: URL? = {
+        guard let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+        else { return nil }
+        let dir = base.appendingPathComponent("MarkdownEngineLatex", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }()
+
+    /// Reused across renders: `MTMathUILabel()` adds an errorLabel subview on every
+    /// init, so a fresh label per formula doubles the per-formula label overhead.
+    /// render() is main-thread-only (it reads NSApp), so a single shared label is safe.
+    private lazy var reusableLabel = MTMathUILabel()
+
     /// - Parameter singleLetterPaddingBottom: Extra bottom padding (in
     ///   points) added to single-letter formulas to prevent visual
     ///   clipping; matches the engine's
@@ -57,12 +78,29 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         cacheLock.lock()
         cache.removeAll()
         cacheLock.unlock()
+        // The disk mirror is keyed by appearance/theme/font, so a flip already
+        // maps to different keys; but an explicit clearCache() means "forget
+        // everything", so drop the disk mirror too.
+        if let dir = diskCacheDir {
+            try? FileManager.default.removeItem(at: dir)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
     }
 
     // MARK: - LatexRenderer
 
     public func render(
         latex: String,
+        fontSize: CGFloat,
+        theme: MarkdownEditorTheme
+    ) -> LatexRenderResult? {
+        // Preserve the historical mode-less behavior.
+        render(latex: latex, mode: .inline, fontSize: fontSize, theme: theme)
+    }
+
+    public func render(
+        latex: String,
+        mode: LatexRenderMode,
         fontSize: CGFloat,
         theme: MarkdownEditorTheme
     ) -> LatexRenderResult? {
@@ -74,6 +112,7 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         let textColor = isDarkMode ? theme.latexDarkModeText : theme.latexLightModeText
         let key = CacheKey(
             latex: normalizedLatex,
+            mode: mode,
             fontSize: fontSize,
             isDarkMode: isDarkMode,
             lightColorRGB: Self.colorFingerprint(theme.latexLightModeText),
@@ -91,19 +130,78 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         }
         cacheLock.unlock()
 
-        guard let entry = renderLatex(normalizedLatex, fontSize: fontSize, textColor: textColor) else {
+        // Disk mirror: a hit here skips the ~2ms typeset for a ~0.3ms PNG load.
+        if let entry = loadFromDisk(key: key) {
+            cacheLock.lock()
+            cache[key] = entry
+            cacheLock.unlock()
+            return LatexRenderResult(image: entry.image, size: entry.size,
+                                     baselineOffset: entry.baselineOffset)
+        }
+
+        guard let entry = renderLatex(
+            normalizedLatex,
+            mode: mode,
+            fontSize: fontSize,
+            textColor: textColor
+        ) else {
             return nil
         }
 
         cacheLock.lock()
         cache[key] = entry
         cacheLock.unlock()
+        saveToDisk(key: key, entry: entry)
 
         return LatexRenderResult(
             image: entry.image,
             size: entry.size,
             baselineOffset: entry.baselineOffset
         )
+    }
+
+    // MARK: - Disk cache
+
+    /// Stable filename for a cache key: SHA-256 of the fingerprinting fields, hex.
+    private func diskFilename(for key: CacheKey) -> String {
+        let mode = key.mode == .display ? "display" : "inline"
+        let composite = "\(key.latex)|\(mode)|\(key.fontSize)|\(key.isDarkMode)|\(key.lightColorRGB)|\(key.darkColorRGB)"
+        let digest = SHA256.hash(data: Data(composite.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined() + ".mathcache"
+    }
+
+    /// Persisted form: PNG pixels + the point-size and baseline the layout needs
+    /// (PNG carries pixels only, not the point size or baseline, so they are stored
+    /// alongside). Reconstructed image is byte-identical in appearance (PNG lossless).
+    private func loadFromDisk(key: CacheKey) -> CacheEntry? {
+        guard let dir = diskCacheDir else { return nil }
+        let url = dir.appendingPathComponent(diskFilename(for: key))
+        guard let data = try? Data(contentsOf: url),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+              let png = plist["png"] as? Data,
+              let w = plist["w"] as? Double, let h = plist["h"] as? Double,
+              let baseline = plist["b"] as? Double,
+              let rep = NSBitmapImageRep(data: png) else {
+            return nil
+        }
+        let size = CGSize(width: w, height: h)
+        rep.size = size
+        let image = NSImage(size: size)
+        image.addRepresentation(rep)
+        return CacheEntry(image: image, size: size, baselineOffset: CGFloat(baseline))
+    }
+
+    private func saveToDisk(key: CacheKey, entry: CacheEntry) {
+        guard let dir = diskCacheDir,
+              let rep = entry.image.representations.first as? NSBitmapImageRep,
+              let png = rep.representation(using: .png, properties: [:]) else { return }
+        let plist: [String: Any] = [
+            "png": png, "w": Double(entry.size.width), "h": Double(entry.size.height),
+            "b": Double(entry.baselineOffset)
+        ]
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: plist, format: .binary, options: 0)
+        else { return }
+        try? data.write(to: dir.appendingPathComponent(diskFilename(for: key)), options: .atomic)
     }
 
     // MARK: - Private
@@ -118,13 +216,20 @@ public final class SwiftMathBridge: LatexRenderer, @unchecked Sendable {
         return (r << 16) | (g << 8) | b
     }
 
-    private func renderLatex(_ latex: String, fontSize: CGFloat, textColor: NSColor) -> CacheEntry? {
-        let mathLabel = MTMathUILabel()
+    private func renderLatex(
+        _ latex: String,
+        mode: LatexRenderMode,
+        fontSize: CGFloat,
+        textColor: NSColor
+    ) -> CacheEntry? {
+        // Reused instance (see `reusableLabel`); every property is set below so no
+        // stale state carries between formulas.
+        let mathLabel = reusableLabel
         mathLabel.latex = latex
         mathLabel.fontSize = fontSize
         mathLabel.textColor = textColor
         mathLabel.textAlignment = .left
-        mathLabel.labelMode = .text
+        mathLabel.labelMode = mode == .display ? .display : .text
 
         // Latin Modern Math gives the cleanest LaTeX glyphs at typical sizes.
         if let mathFont = MTFontManager().font(withName: "latinmodern-math", size: fontSize) {

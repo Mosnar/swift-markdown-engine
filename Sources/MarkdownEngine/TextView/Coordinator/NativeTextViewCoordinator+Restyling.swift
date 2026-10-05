@@ -19,6 +19,15 @@ extension NativeTextViewCoordinator {
         from text: String,
         invalidateLayout: Bool = false
     ) {
+        // Suppress the re-entrant textViewDidChangeSelection that `textView.string =`
+        // and the setAttributedString transfer below fire synchronously (71ms of
+        // redundant styling on a 346k note); the necessary side effect is replayed once
+        // at the end of this method.
+        isRebuildingDocument = true
+        defer { isRebuildingDocument = false }
+        // A rebuild means a different document (or a mode flip): drop the caret
+        // ink resolved for the old one instead of carrying it into this text.
+        resolvedCaretColor = nil
         // Storage is raw Markdown; only wiki links transform on display.
         // In raw source mode display IS storage — no transform, no metadata.
         let services = configuration.services
@@ -33,6 +42,12 @@ extension NativeTextViewCoordinator {
             wikiLinkMetadata = displayState.metadata
         }
 
+        // Claimed BEFORE the assignment: `textView.string =` re-enters
+        // textViewDidChangeSelection synchronously, whose updateCodeBlockSelection
+        // laid out the whole (still unstyled) document — 141ms / 7714 fragments that
+        // the ensureLayout below rebuilds from scratch anyway. This rebuild's own
+        // ensureLayout IS that one-shot per-document layout.
+        didEnsureLayoutForCurrentDocument = true
         if textView.string != displayText {
             textView.string = displayText
             parseGeneration &+= 1
@@ -61,15 +76,38 @@ extension NativeTextViewCoordinator {
             .foregroundColor: configuration.theme.bodyText,
             .paragraphStyle: paragraph
         ]
-        textView.textStorage?.beginEditing()
-        textView.textStorage?.removeAttribute(.link, range: fullRange)
-        textView.textStorage?.setAttributes(baseAttrs, range: fullRange)
+        // ── Root cause & fix (2026-07) ────────────────────────────────────────
+        // CPU+page-fault instrumentation proved the first per-process open of a large
+        // note spent 12.5s of PURE CPU (blocked=2ms), writing 69k attributes to the LIVE
+        // TextKit-2 storage and faulting in 315k pages / ~5GB; a later open with warm
+        // pages does the identical work in 78ms. So the whole styled string is built on a
+        // DETACHED NSMutableAttributedString and handed to the live storage in ONE
+        // transfer — the expensive first-touch happens off the layout-connected storage.
+        let built = NSMutableAttributedString(string: displayText)
+        built.setAttributes(baseAttrs, range: fullRange)
 
+        // Kept for the end-of-rebuild selection replay (see below); raw mode leaves it nil.
+        var parsedForReplay: ParsedDocument?
         if rawMode {
             // Base attributes only — the source stays verbatim and unstyled.
             activeTokenIndices = []
+            // Raw mode draws no code-block overlays; drop the styled document's
+            // tokens so a later no-`parsed` refresh doesn't substring this text
+            // with them.
+            cachedCodeBlockTokens = []
+            lastCodeSelKey = nil
         } else {
             let parsed = parsedDocument(for: displayText)
+            parsedForReplay = parsed
+            // A rebuild replaces the text under the code-block token cache, but
+            // only the typing/caret delegate paths refresh that cache — a
+            // programmatic swap (document switch, external binding change) never
+            // does. The deferred no-`parsed` refresh in `updateNSView` then cut
+            // substrings out of THIS text with the PREVIOUS document's ranges:
+            // out of range on any shorter text → NSRangeException → abort. This
+            // parse is the current text's, so hand its tokens over here.
+            cachedCodeBlockTokens = parsed.codeBlockTokensWithIndices
+            lastCodeSelKey = nil
             let tokens = parsed.tokens
             // Hide caret from styling when read-only, else clicks reveal raw token syntax.
             let caretLocation = textView.isEditable ? textView.selectedRange().location : -1
@@ -97,15 +135,37 @@ extension NativeTextViewCoordinator {
                 wikiLinkIDProvider: { [weak self] range in self?.wikiLinkID(for: range) },
                 precomputedTokens: tokens,
                 classified: parsed.classified,
+                // Same parse the tokens came from; without it the styler ran the
+                // block parser a SECOND time over the whole document per open.
+                precomputedBlocks: parsed.blocks,
                 configuration: configuration
             )
-            for (range, attrs) in ranges {
-                for (key, value) in attrs {
-                    textView.textStorage?.addAttribute(key, value: value, range: range)
-                }
+            // scoped=nil is the point: the rebuild passes no scopedRanges, so
+            // every token in the document is styled.
+
+            // ROOT CAUSE (proven by a CPU sample of the 12.5–16s first-open hang):
+            // per-key `addAttribute` creates a short-lived intermediate dict on every
+            // call (the run's dict grows one key at a time), each interned into
+            // Foundation's global WEAK NSAttributeDictionary table. Each intermediate
+            // dies at the next add, leaving a weak tombstone, so the next insert triggers
+            // `-[NSConcreteHashTable rehashAround:]` to compact — O(table) per insert,
+            // quadratic overall, amplified by the app's large heap (expensive objc weak
+            // ops). Coalescing to non-overlapping runs and writing each with ONE
+            // `setAttributes` interns exactly one LIVE dict per run — no intermediates, no
+            // tombstones, no rehash thrash. First open dropped from 16s to tens of ms.
+            let runs = MarkdownStyler.flattenedRuns(ranges, base: baseAttrs,
+                                                    documentLength: fullRange.length)
+            for (range, attrs) in runs {
+                built.setAttributes(attrs, range: range)
             }
         }
+
+        // ONE live-storage mutation carries the whole styled document across. This is the
+        // only edit that touches the layout-connected storage.
+        textView.textStorage?.beginEditing()
+        textView.textStorage?.setAttributedString(built)
         textView.textStorage?.endEditing()
+
 
         textView.typingAttributes = TextStylingService.makeBaseTypingAttributes(
             font: baseFont,
@@ -120,23 +180,45 @@ extension NativeTextViewCoordinator {
             tlm.ensureLayout(for: tlm.documentRange)
         }
 
+        // The re-entrant textViewDidChangeSelection was suppressed for this rebuild
+        // (isRebuildingDocument), so replay the one selection-derived side effect nothing
+        // else runs afterwards: spell/grammar/quote toggles for the loaded caret. Also seed
+        // the selection bookkeeping the next real selection change diffs against, so it
+        // starts from the loaded document instead of the previous one's stale caret. Raw
+        // mode / active Writing Tools skip both, exactly as the suppressed handler's own
+        // rawSourceMode / isWritingToolsActive early-returns would have.
+        if let parsed = parsedForReplay, !isWritingToolsActive {
+            let finalSelection = textView.selectedRange()
+            updateAutocorrectSettings(
+                textView,
+                caretLocation: finalSelection.location,
+                codeTokens: parsed.codeTokens,
+                latexTokens: parsed.latexTokens,
+                allTokens: parsed.tokens
+            )
+            previousActiveTokenIndices = activeTokenIndices
+            previousCaretLocation = finalSelection.location
+            previousSelectedRange = finalSelection
+        }
+
         // Reconcile wide-table overlays after layout settles.
         if let nativeTextView = textView as? NativeTextView {
-            DispatchQueue.main.async { [weak nativeTextView] in
-                nativeTextView?.updateWideTableOverlays()
-            }
+            nativeTextView.updateWideTableOverlays()
         }
     }
 
+    @discardableResult
     func restyleTextView(
         _ textView: NSTextView,
         paragraphCandidates: [NSRange],
         tokens: [MarkdownToken]? = nil,
         classified: MarkdownStyler.ClassifiedStyleTokens? = nil,
-        blocks: [Block]? = nil
-    ) {
+        blocks: [Block]? = nil,
+        sourceText: String? = nil,
+        content: TextStylingService.RestyleContent = .all
+    ) -> [NSRange] {
         // Raw mode: no restyling; typing keeps base attrs via the typing shim.
-        guard !configuration.rawSourceMode else { return }
+        guard !configuration.rawSourceMode else { return [] }
         let (baseFont, paragraphStyle) = TextStylingService.makeBaseFontAndStyle(
             fontName: fontName,
             fontSize: fontSize,
@@ -144,7 +226,7 @@ extension NativeTextViewCoordinator {
             configuration: configuration
         )
 
-        TextStylingService.restyle(
+        let wideTableAnchorRanges = TextStylingService.restyle(
             textView: textView,
             layoutBridge: layoutBridge,
             paragraphCandidates: paragraphCandidates,
@@ -162,14 +244,18 @@ extension NativeTextViewCoordinator {
             precomputedTokens: tokens,
             classified: classified,
             precomputedBlocks: blocks,
+            sourceText: sourceText,
+            content: content,
             configuration: configuration
         )
-        // Reconcile wide-table overlays after layout settles.
-        if let nativeTextView = textView as? NativeTextView {
-            DispatchQueue.main.async { [weak nativeTextView] in
-                nativeTextView?.updateWideTableOverlays()
-            }
+        // Width-specific callers already have the exact new wide-table anchor
+        // set and reconcile it after the one full height layout. Ordinary
+        // styling still uses the coalesced storage-discovery path.
+        if case .all = content,
+           let nativeTextView = textView as? NativeTextView {
+            nativeTextView.updateWideTableOverlays()
         }
+        return wideTableAnchorRanges
     }
 
     func parsedDocument(for text: String, edit: ParseEditDescriptor? = nil) -> ParsedDocument {
@@ -234,6 +320,10 @@ extension NativeTextViewCoordinator {
             }
         }
 
+        let nsText = text as NSString
+        let tableParagraphRanges = tableTokens.compactMap {
+            $0.standaloneParagraphRange(in: nsText)
+        }
         parsedDocumentVersion &+= 1
         let parsed = ParsedDocument(
             tokens: tokens,
@@ -244,6 +334,7 @@ extension NativeTextViewCoordinator {
             wikiLinkTokens: wikiLinkTokens,
             imageEmbedTokens: imageEmbedTokens,
             tableTokens: tableTokens,
+            tableParagraphRanges: tableParagraphRanges,
             codeBlockTokensWithIndices: codeBlockTokensWithIndices,
             classified: MarkdownStyler.ClassifiedStyleTokens(
                 inlineLatex: inlineLatexIdx, blockLatex: blockLatexIdx,
@@ -341,6 +432,43 @@ extension NativeTextViewCoordinator {
         )
         restyleTextView(textView, paragraphCandidates: paragraphs, tokens: tokens,
                         classified: parsed.classified, blocks: parsed.blocks)
+    }
+
+    /// Width changes cannot alter non-table Markdown styling. Reuse the
+    /// current parse and its indexed table paragraphs, then run only the table
+    /// renderer so a resize does not traverse the generic AST or unrelated
+    /// image passes.
+    func restyleTablesForWidthChange(in textView: NSTextView) -> [NSRange] {
+        let documentText: String
+        let parsed: ParsedDocument
+        if cachedParseGeneration == parseGeneration,
+           cachedParsedLength == textView.textStorage?.length,
+           let cachedParsedText,
+           let cachedParsedDocument {
+            documentText = cachedParsedText
+            parsed = cachedParsedDocument
+        } else {
+            documentText = textView.string
+            parsed = parsedDocument(for: documentText)
+        }
+        guard !parsed.tableParagraphRanges.isEmpty else { return [] }
+
+        let nsText = documentText as NSString
+        activeTokenIndices = activeTokenIndices(
+            parsed: parsed,
+            selection: textView.selectedRange(),
+            in: nsText,
+            suppressed: !textView.isEditable
+        )
+        return restyleTextView(
+            textView,
+            paragraphCandidates: parsed.tableParagraphRanges,
+            tokens: parsed.tokens,
+            classified: parsed.classified,
+            blocks: parsed.blocks,
+            sourceText: documentText,
+            content: .tables
+        )
     }
 
     func applyInlineReplacement(_ request: InlineReplacementRequest, to textView: NSTextView) {

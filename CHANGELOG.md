@@ -19,12 +19,250 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on scroll so the anchor never goes stale under a stationary pointer.
 
 ### Changed
+- Integrated upstream 0.14.0. Kept Beadazzle's automatic issue links, hover
+  previews, document-write safeguards, multi-document find, and bullet alignment.
 - **Behavioral divergence from upstream:** `NativeTextView` overrides
   `resetCursorRects()` to do nothing and owns all cursor updates through its
   own tracking area (`mouseMoved`/`cursorUpdate`/`flagsChanged`). NSTextView's
   built-in link cursor rects would fight the modifier-dependent cursor of
   command-click automatic links and flicker. Built-in cursor-rect behaviors
   (e.g. link tooltips) are disabled for all embedders as a result.
+
+## [0.14.0] - 2026-10-04
+
+### Added
+- `SpellCheckingPolicy.automaticQuoteSubstitution` (default `true`, unchanged behavior) lets embedders editing raw Markdown/LaTeX source keep straight `'` and `"`; smart quotes were forced on at creation and re-enabled on every caret move out of a code/LaTeX/link span. The Smart Quotes menu toggle is now captured like the spelling toggles.
+- **Directive glyph presentation**: a self-contained call (`@marker`,
+  `@glyph(star.fill)`) collapses its source behind an SF Symbol, replacement
+  text, or an image supplied by the directive's `presentation`, and reveals the
+  real characters again under the caret. The source is never removed from the
+  storage — it collapses to zero width the same way inline LaTeX does — so
+  selection, find, copy, and undo still see it. `Demo/` gains `@icon`, `@flag`,
+  `@emoji`, and `@pagebreak` as embedder-side directives — anything carrying
+  curated data or document policy is an app concern, not an engine primitive.
+- **Directive autocomplete** for both directive names and argument values,
+  riding the existing inline-preview seam (`onDirectiveCompletion`,
+  `pendingDirectiveCompletion`); the engine detects the trigger, ranks the
+  candidates from the registry and from the directive's own
+  `valueCompletions`, routes ↑/↓/↵/Esc, and ships no picker UI. The default
+  `valueCompletions` already answers anything the declared schema can — closed
+  keyword sets and booleans — so a directive implements it only when its domain
+  is dynamic or too large to declare.
+
+### Fixed
+- Nested lists keep their levels both ways: copied out as nested HTML/RTF
+  instead of one flat list, and read back from WebKit's sibling-sublist shape
+  (Mail, Notes) instead of dropping its items. Task boxes render with the list
+  helpers turned off.
+- A trackpad held against the top or bottom of the editor no longer flickers.
+  AppKit applies a scroll on the next display refresh, after `scrollWheel(with:)`
+  has returned, so the clamp there only ever corrected the PREVIOUS event — with
+  the rubber band allowed, every refresh committed a fresh overshoot (12–24pt)
+  and every event pulled it back. `ClampedScrollView` now disables vertical
+  elasticity; the document view is already sized to the real content height, so
+  AppKit stops exactly at the edge and the clamp is a backstop again.
+- A programmatic content swap — a document switch, or the SwiftUI `text` binding
+  changing from outside the editor — left the code-block selection pass reading
+  the PREVIOUS document's ranges: only the typing and caret paths refreshed that
+  cache, never the rebuild. The length guard from #151 stops the resulting
+  `NSRangeException`, but only for ranges that no longer fit; an incoming
+  document that is LONGER keeps them in bounds, so a copy button was reported
+  over ordinary prose, carrying a slice of that prose as its code. The rebuild
+  now hands its own parse to the cache.
+
+### Changed
+- Raw source mode reports no code blocks. It draws no overlays either way, but
+  the token cache used to survive the switch into it, so an embedder arriving
+  from styled mode kept its copy buttons while one opening straight into raw
+  mode never had them. Now neither does.
+
+## [0.13.0] - 2026-09-20
+
+### Added
+- `rendersTablesDuringLiveResize` lets embedders defer table reflow until resize ends while preserving synchronous final-width updates.
+- **Directive seam (parsing)**: opt-in named inline commands with typed
+  arguments, for constructs that need a name and parameters rather than
+  delimiters. A `MarkdownDirective` declares a name, a form — self-contained
+  (`@pagebreak`) or container (`@font(size: 18){text}`) — and a parameter
+  schema; register instances via `MarkdownEditorConfiguration.directives`.
+  Directives never emit ranges and project into the AST as extension-shaped
+  nodes under a reserved `directive.` id namespace, so marker shrink, caret
+  reveal, token projection, incremental restyle, and rich copy apply unchanged.
+  The directive registry folds into the existing grammar fingerprint, so a
+  directive-free registry is byte-identical to before. The marker defaults to
+  `@` and is configurable per registry and per directive; unregistered names
+  stay literal text. Styling and autocomplete follow separately. A directive whose body
+  contains a span claimed by an earlier pass — a code span or a backslash
+  escape — stays literal as a whole; constructs claimed in the same pass or
+  later (`$…$`, links, emphasis, nesting) compose normally.
+- **Directive styling**: a container directive's `style` composes over the font
+  inherited at that point in the tree, so `@font(size: 18){**bold**}` is bold
+  AND 18pt rather than one overwriting the other. `FontDirective` and
+  `ColorDirective` ship as opt-in reference directives, off by default like the
+  bundled extensions. `MarkdownHTMLRenderer.html(from:extensions:directives:)`
+  takes the registered set so rich copy matches what is on screen.
+- `NativeTextViewWrapper.onTextMutation` reports exact, completed native edits
+  for embedders that maintain their own source authority or mirror edits into
+  another presentation.
+- `MarkdownEditorConfiguration.thematicBreak` (`ThematicBreakStyle`) gives each
+  thematic-break marker its own look. CommonMark treats `---`, `***` and `___`
+  as one construct with one rendering, so an embedder who wanted a novel-style
+  star divider on `***` had no way to ask for one without inventing syntax.
+  Setting `asteriskMark` draws that string centred in the text container in
+  place of the full-width rule; `dashMark` and `underscoreMark` do the same for
+  their markers. All three default to nil, so every existing embedder keeps the
+  rule it already has. Presentation only — the source text is untouched, the
+  caret still reveals the raw `***`, the construct still exports as `<hr>`, and
+  a document written this way reads correctly in any other editor. The mark is
+  a literal string rather than a symbol name, so pick one whose glyphs exist in
+  every font you ship: a glyph the body font lacks does not draw as tofu, it
+  silently falls back to another typeface (`⁂` asked for in a serif renders as
+  Helvetica), and the engine cannot tell that from a deliberate choice. A mark carries a `scale` (a multiple of the
+  body font size, 1 by default), and above 1 the break's line grows to fit
+  rather than the mark overlapping its neighbours. Marks are centred on their
+  INK rather than their layout box, because a glyph like `*` is drawn high in
+  its em — its optical centre sits about a quarter of the font size above the
+  lowercase centre, and that gap grows with the size, so box-centring would let
+  a larger mark climb toward the top of its line.
+
+### Changed
+- The span-density regression tests assert on counted work instead of elapsed
+  time, so they run on CI again. `InlineParser.parse` can report an
+  `InlineParseCost` — claimed-range probes and containment tests — which is a
+  pure function of the input and therefore reads the same on a laptop and on a
+  contended runner. Linear measures 6.0x for 6x the spans; the pre-rewrite
+  pairwise containment measures 33.9x. The wall-clock assertions stay for
+  absolute numbers, still opt-in via `MDE_PERF=1`.
+- An ordered list's painted number no longer reverts to the source digit under
+  the caret or a selection. The number is positional, so in a run written
+  `1./1./1.` a click inside a marker — or a select-all — flipped every number
+  below an insertion back to whatever the file happens to say. The source marker
+  is hidden by size now, like every other marker the engine hides: a selection
+  repaints selected glyphs opaque, so a colour-hidden marker came back under the
+  highlight and collided with the number drawn over it. The marker's
+  caret-crossing restyle signal went with the reveal.
+
+### Fixed
+- Block LaTeX formulas now use display typesetting, so large-operator limits
+  and fractions render correctly.
+- Rendered tables now follow every live editor-width change, including
+  fractional widths, and settle at the final width when window resizing ends.
+
+### Performance
+- Scoped restyles inside a contiguous list parse and style only intersecting
+  items instead of rebuilding the whole list block. Marker, indentation,
+  line-break, programmatic, and undo/redo edits still widen ordered-list runs
+  when downstream display numbers can change.
+
+## [0.12.0] - 2026-08-10
+
+### Added
+- `onPersistScrollOffset` / `restoreScrollOffset` on `NativeTextViewWrapper` —
+  scroll memory an embedder can keep somewhere that outlives the editor. The
+  engine's own per-document offsets live on the coordinator, so an embedder that
+  routes to a different screen and back lost them: nothing recorded the offset on
+  the way out (there was no `dismantleNSView` at all), and the restore was gated
+  on a document switch, which a remount is not — `makeCoordinator` seeds
+  `documentId`, so the first update pass never looks like one. Teardown now hands
+  the offset over, and the restore is latched instead of gated, retrying for a
+  bounded few passes because the first pass after a remount still carries the
+  embedder's empty buffer. Both closures are asked at call time, so the
+  embedder's own retention rules can see changes made on the way out. Passing
+  neither leaves behavior unchanged.
+
+- `NSAttributedString.Key.markdownBlockBackground` — a background painted
+  across the whole line box by `MarkdownTextLayoutFragment` instead of the
+  glyph box AppKit's `.backgroundColor` covers. Embedder extensions can use it
+  wherever a fill should read as a block.
+
+### Changed
+- **Inline parse cost is linear in the spans per region, not quadratic.** Every
+  pass after the first consulted the claimed ranges by scanning the whole array
+  — once per character in `scanEscapes` and `collectDelimiterRuns`, once per
+  candidate in `scanLinkFamily` — and `buildTree` decided containment by testing
+  each span against every other. The passes walk the string left to right and
+  claimed ranges never partially overlap, so a cursor over the sorted ranges answers both
+  questions in amortised constant time, and sorting spans by start ascending /
+  length descending turns containment into a single ordered walk. A paragraph of
+  240 code spans parses in 0.5ms rather than 33ms; 6x the spans now costs 6x the
+  parse instead of ~30x. Affects every claimed-span construct — code, escapes,
+  links, images, wiki links, inline LaTeX, emphasis, and extension spans. No
+  parse result changes.
+- `==highlight==` fills the line box. AppKit paints `.backgroundColor` over
+  ascent + descent only, so the marker fell short of the line height by the
+  leading plus `paragraph.lineHeightExtraSpacing`, and a highlight that wrapped
+  came out as a stack of bands. `HighlightExtension` returns
+  `.markdownBlockBackground` now, so the block is continuous at any font size.
+  Table cells rasterize their own text and keep the glyph-box fill.
+
+### Fixed
+- Bare URLs and emails survive rich copy as real links. The editor styler
+  linkifies them with `NSDataDetector`, but the HTML renderer emitted them as
+  plain text, so the pasteboard's HTML/RTF/web-archive flavors carried no anchor
+  at all, and whether a copied URL arrived clickable was left to the receiving
+  app — Apple Mail runs its own detection and linkifies anyway, a consumer that
+  takes the rich flavor verbatim pastes dead text. `MarkdownHTMLRenderer` now
+  wraps detector matches in `<a href>` (emails as `mailto:`) using the same
+  system detector as the styler; the RTF and web-archive flavors are derived
+  from that HTML, so all three inherit the link. Explicit `[title](url)` links
+  were already correct; a URL-shaped run inside a link's own title stays plain
+  so anchors never nest, and code spans remain excluded, matching the styler.
+  Table cells are unaffected: they render no inline markup on the copy path.
+- Markdown link labels may hold inline code and escaped punctuation —
+  ``[`App`](/tmp/App.swift:56)`` stayed literal. Code spans and escapes are
+  claimed before links so they stay opaque, and the link pass rejected every
+  candidate overlapping a claimed span, including one lying entirely inside the
+  label. Spans contained in the label are permitted now, links act as
+  containers when the tree is built, and partial overlaps or spans crossing the
+  label boundary are still rejected.
+- Initially narrow tables reflow when the editor width shrinks instead of
+  retaining stale image geometry until an unrelated full restyle.
+
+## [0.11.0] - 2026-07-31
+
+### Added
+- **Ordered lists render their position.** An item's number is computed from its
+  place in the run and painted over the source digits, so typing, deleting,
+  merging and pasting renumber live. The `.md` file is never rewritten — the
+  source stays valid CommonMark whatever it says. The whole source marker is
+  hidden as one unit and the slot is kerned to the display width, so the dot
+  travels with the digits at any digit count; the raw digits are revealed while
+  they are edited.
+- `MarkdownEditorConfiguration.cursorFollowsSpanInk` (opt-in, off by default):
+  the caret and the I-beam take the ink of the extension span they sit in. It
+  matters for an extension that INVERTS its content — dark ink on a light block
+  — where both cursors are otherwise drawn in the block's own color and
+  disappear inside it. `InvertedIBeamCursor` recolors the live `NSCursor.iBeam`
+  image, which keeps the system shape and the user's pointer size.
+
+### Fixed
+- Find-in-document no longer erases other backgrounds. Clearing its highlights
+  removed `.backgroundColor` across the whole document, which blanked extension
+  spans, code fences and table cells until some unrelated restyle repainted
+  them. Find now marks its own backgrounds and restyles only the paragraphs it
+  touched.
+
+### Performance
+- **Large notes open ~14× faster.** Measured on a 346k-char / 5,241-block note
+  (Release): first open 19.5 s → 1.35 s, warm open 1.1 s → 590 ms, switching
+  away 440 ms → 115 ms. Styling is built on a detached string and transferred
+  with one `setAttributedString` — per-key `addAttribute` on live TextKit-2
+  storage left weak tombstones in Foundation's attribute-intern table, which
+  turned quadratic. The restyle apply uses a paragraph overlap index above 32
+  paragraphs, the redundant second full-document parse and the re-entrant
+  full-document layout during rebuild are gone, and the SwiftMath render cache
+  persists to disk (717 ms → 35 ms on relaunch, byte-identical geometry).
+- **Editing long ordered lists.** One Return in an 800-item loose list:
+  944 ms → 67 ms (was quadratic in list length). Typing in a 1,600-item ordered
+  list: 89 ms → 41 ms per key. Resolving the caret ink across 1,600 spans:
+  0.134 ms → 0.002 ms per keystroke.
+
+### Known limitations
+- A list item's continuation line is a paragraph and ends the run, so a
+  multi-line item switches numbering off below it.
+- A loose list keeps stale numbers after a pure digit edit (a digit edit is not
+  classified as structural).
+- Ordered task items (`1. [ ] x`) consume a number but render none.
 
 ## [0.10.1] - 2026-07-22
 

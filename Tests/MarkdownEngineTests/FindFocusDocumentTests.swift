@@ -18,14 +18,38 @@ struct FindFocusDocumentTests {
     private static let queryName = Notification.Name("test.find.query")
     private static let resultsName = Notification.Name("test.find.results")
 
-    private struct Editor {
+    @MainActor
+    private final class Editor {
         let textView: NativeTextView
         let coordinator: NativeTextViewCoordinator
         /// Retains the scroll view so `wrapperAnchorRect` has one to convert into.
         let scrollView: NSScrollView
+        /// Find only searches editors attached to a window.
+        let window: NSWindow
+
+        init(textView: NativeTextView, coordinator: NativeTextViewCoordinator, scrollView: NSScrollView) {
+            self.textView = textView
+            self.coordinator = coordinator
+            self.scrollView = scrollView
+            window = NSWindow(
+                contentRect: scrollView.frame,
+                styleMask: [.borderless], backing: .buffered, defer: false
+            )
+            window.contentView = scrollView
+        }
+
+        deinit {
+            MainActor.assumeIsolated { window.contentView = nil }
+        }
+    }
+
+    @MainActor
+    private final class FindReply {
+        var userInfo: [AnyHashable: Any]?
     }
 
     private func makeEditor(documentId: String, text: String) -> Editor {
+        _ = NSApplication.shared
         let scrollView = NSScrollView(frame: NSRect(x: 0, y: 0, width: 600, height: 400))
         let textView = NativeTextView(frame: scrollView.contentView.bounds)
         textView.minSize = .zero
@@ -131,13 +155,13 @@ struct FindFocusDocumentTests {
     @Test("Results identify the document and echo the query")
     func resultsIdentifyDocumentAndEchoQuery() async {
         let editor = makeEditor(documentId: "doc-a", text: "alpha beta alpha")
-        var received: [AnyHashable: Any]?
+        let received = FindReply()
         let observer = NotificationCenter.default.addObserver(
             forName: Self.resultsName,
             object: nil,
             queue: nil
         ) { note in
-            received = note.userInfo
+            MainActor.assumeIsolated { received.userInfo = note.userInfo }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
 
@@ -147,9 +171,9 @@ struct FindFocusDocumentTests {
             userInfo: ["query": "alpha", "currentIndex": 0, "focusDocumentId": "doc-a"]
         ))
 
-        #expect(received?["documentId"] as? String == "doc-a")
-        #expect(received?["query"] as? String == "alpha")
-        #expect(received?["count"] as? Int == 2)
+        #expect(received.userInfo?["documentId"] as? String == "doc-a")
+        #expect(received.userInfo?["query"] as? String == "alpha")
+        #expect(received.userInfo?["count"] as? Int == 2)
     }
 
     @Test("Only the focused document reports a match rect")
@@ -279,14 +303,14 @@ struct FindFocusDocumentTests {
     @Test("The request token is echoed back so a host can drop stale replies")
     func requestTokenIsEchoed() {
         let editor = makeEditor(documentId: "doc-a", text: "alpha alpha")
-        var received: [AnyHashable: Any]?
+        let received = FindReply()
         let observer = NotificationCenter.default.addObserver(
             forName: Self.resultsName,
             object: nil,
             queue: nil
         ) { note in
             guard note.userInfo?["documentId"] as? String == "doc-a" else { return }
-            received = note.userInfo
+            MainActor.assumeIsolated { received.userInfo = note.userInfo }
         }
         defer { NotificationCenter.default.removeObserver(observer) }
 
@@ -301,7 +325,7 @@ struct FindFocusDocumentTests {
             ]
         ))
 
-        #expect(received?["requestToken"] as? Int == 17)
+        #expect(received.userInfo?["requestToken"] as? Int == 17)
     }
 
     @Test("A query with no token reports none, leaving single-document hosts unchanged")

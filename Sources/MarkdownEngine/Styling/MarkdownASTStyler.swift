@@ -51,6 +51,10 @@ enum MarkdownASTStyler {
         codePara.tailIndent = -configuration.codeBlock.horizontalIndent
         codePara.minimumLineHeight = codeLineHeight
         codePara.maximumLineHeight = codeLineHeight
+        // precomputed=0 ⇒ the document is parsed a SECOND time here (the rebuild already parsed it).
+        // Ahead of `ctx` because the ordered-list display numbers are derived from these blocks.
+        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
+                                       registry: configuration.extensionRegistry)
         let ctx = Ctx(
             ns: ns,
             fontName: fontName,
@@ -66,10 +70,9 @@ enum MarkdownASTStyler {
             config: configuration,
             extensionsByID: configuration.extensionsByID,
             wikiLinkID: wikiLinkIDProvider,
-            scopedRanges: scopedRanges
+            scopedRanges: scopedRanges,
+            orderedDisplayNumbers: computeOrderedDisplayNumbers(blocks: blocks, ns: ns)
         )
-        let blocks = DocumentAST.parse(text, scopedRanges: scopedRanges, precomputedBlocks: precomputedBlocks,
-                                       registry: configuration.extensionRegistry)
         var attrs: [StyledRange] = []
         for block in blocks where ctx.inScope(block.range) {
             styleBlock(block, font: baseFont, ctx: ctx, into: &attrs)
@@ -175,7 +178,20 @@ enum MarkdownASTStyler {
         try? NSRegularExpression(pattern: pattern, options: anchored ? [.anchorsMatchLines] : [])
     }
 
+    // Built once, reused: rebuilding these on every restyle cost 43ms (detector)
+    // + 78ms (6 regexes) on a 346k note with hits=0 (ENG-8g1b/c).
+    private static let autoLinkDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+    private static let incompleteLinkPatterns: [NSRegularExpression] =
+        [#"\[\]"#, #"\[\[\]\]"#, #"\[[^\]\r\n]*$"#, #"\[[^\]\r\n]+\](?!\()"#,
+         #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#].compactMap { regex($0, false) }
+
     /// Tag a thematic-break line for a full-width rule (AST-driven); suppressed while the caret edits it.
+    ///
+    /// When `configuration.thematicBreak` maps this line's marker to a mark,
+    /// `.thematicBreakMark` rides along and the fragment draws that string
+    /// centered instead of the rule. Resolving here rather than at draw time
+    /// keeps the presentation decision next to the configuration (`Ctx` already
+    /// carries it) and leaves the fragment with nothing to look up.
     private static func styleThematicBreak(range: NSRange, ctx: Ctx, into attrs: inout [StyledRange]) {
         var hr = range
         while hr.length > 0 {
@@ -185,13 +201,185 @@ enum MarkdownASTStyler {
         }
         guard hr.length > 0,
               !(NSLocationInRange(ctx.caret, hr) || ctx.caret == NSMaxRange(hr)) else { return }
-        attrs.append((hr, [.foregroundColor: NSColor.clear, .thematicBreak: true]))
-        attrs.append((hr, [.paragraphStyle: NSMutableParagraphStyle()]))
+        var tags: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.clear,
+            .thematicBreak: true,
+        ]
+        let mark = ctx.config.thematicBreak.mark(forMarker: thematicBreakMarker(in: hr, ctx: ctx))
+        if let mark {
+            tags[.thematicBreakMark] = mark.text
+            tags[.thematicBreakMarkScale] = mark.scale
+        }
+        attrs.append((hr, tags))
+
+        // A mark bigger than body size needs the line to grow with it, or it
+        // would be drawn over the paragraphs above and below (the fragment
+        // paints outside the line box; it does not reserve space).
+        let para = NSMutableParagraphStyle()
+        if let mark, mark.scale > 1 {
+            let height = ceil(ctx.baseLineHeight * mark.scale)
+            para.minimumLineHeight = height
+            para.maximumLineHeight = height
+        }
+        attrs.append((hr, [.paragraphStyle: para]))
+    }
+
+    /// The marker character of a thematic-break line: its first non-whitespace
+    /// character. Sound by construction — `BlockParser.isThematicBreak` accepts
+    /// the line only when every non-whitespace character is the same one of
+    /// `-`/`*`/`_`. Only trailing newlines are trimmed from the block range, so
+    /// leading indent has to be skipped here.
+    private static func thematicBreakMarker(in hr: NSRange, ctx: Ctx) -> unichar {
+        for offset in 0..<hr.length {
+            let c = ctx.ns.character(at: hr.location + offset)
+            if c != 0x20 && c != 0x09 { return c }
+        }
+        return 0
+    }
+
+    /// Ordered-list display numbers computed across the WHOLE document, keyed by
+    /// each ordered item's marker location. Positional, not the literal digit, so
+    /// any edit renumbers correctly; the count carries across a blank line (a
+    /// loose-list separator) so `1.`/`2.`⏎blank⏎`2.` shows 1,2,3 — real content
+    /// between lists resets it. First item of a run keeps its own start value.
+    /// Like MarkdownLists.listRegex but also accepts `)` ordered markers (`5)`),
+    /// matching the AST — used by the backward seed scan (group 2 = digits).
+    private static let seedOrderedLineRegex = try! NSRegularExpression(
+        pattern: #"^\s*((?:(\d+)[.)]|[-•*+])(?:\s+\[[ xX]\])?\s+)"#
+    )
+
+    /// First non-blank character in a range answers "was there content in the
+    /// hole between two scoped blocks" without materializing the substring.
+    private static let nonWhitespace = CharacterSet.whitespacesAndNewlines.inverted
+
+    /// Replays the ordered-list run that continues ABOVE `loc` (scanning backward
+    /// in the full source: same-indent items counted, blank lines skipped, real
+    /// content stops it) and returns the next number per indent. Lets a scoped
+    /// restyle that only sees a local window continue the document's numbering.
+    private static func seedOrderedCounters(above loc: Int, in ns: NSString) -> [Int: Int] {
+        guard loc > 0, loc <= ns.length else { return [:] }
+        var runLines: [(indent: Int, number: Int?)] = []   // bottom-to-top; nil = bullet/other list
+        // From the START of loc's line: callers pass a MARKER offset, which for
+        // an indented item still sits inside its own line — scanning up from
+        // there counted the item itself, so every nested list rendered one too
+        // high ("  1. a" showing 2.).
+        var scan = ns.lineRange(for: NSRange(location: min(loc, ns.length), length: 0)).location
+        while scan > 0 {
+            let lineRange = ns.lineRange(for: NSRange(location: scan - 1, length: 0))
+            let line = ns.substring(with: lineRange) as NSString
+            let full = NSRange(location: 0, length: line.length)
+            if (line as String).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                scan = lineRange.location                    // blank line: loose-list spacing
+                continue
+            }
+            guard let m = seedOrderedLineRegex.firstMatch(in: line as String, range: full) else { break }
+            let ws = MarkdownLists.leadingWhitespaceRegex.firstMatch(in: line as String, range: full)
+                .map { line.substring(with: $0.range) } ?? ""
+            let number = m.range(at: 2).location != NSNotFound ? Int(line.substring(with: m.range(at: 2))) : nil
+            // Key by the raw leading-whitespace char count to match the parser's
+            // `item.indent` used by computeOrderedDisplayNumbers — otherwise a
+            // nested item's seed counter wouldn't line up and it'd fall back to
+            // the literal digit.
+            runLines.append(((ws as NSString).length, number))
+            scan = lineRange.location
+        }
+        var counters: [Int: Int] = [:]
+        for item in runLines.reversed() {                    // replay top-to-bottom
+            if let number = item.number {
+                counters[item.indent] = (counters[item.indent] ?? number) + 1
+            } else {
+                counters[item.indent] = nil
+            }
+            for key in counters.keys where key > item.indent { counters[key] = nil }
+        }
+        return counters
+    }
+
+    private static func computeOrderedDisplayNumbers(blocks: [BlockNode], ns: NSString) -> [Int: Int] {
+        var result: [Int: Int] = [:]
+        var counters: [Int: Int] = [:]
+        // `blocks` is NOT the document: a scoped restyle keeps only the blocks that
+        // intersect the scope, and a multi-region scope (caret paragraph + previous
+        // caret paragraph, built on every click) drops everything between them —
+        // including the prose whose `default:` below is what ends a run. So treat
+        // every discontinuity like a fresh start and re-seed from the SOURCE, the
+        // only thing that can still see the skipped text. Lazily, at the first
+        // ordered item after the gap, so prose/bullet restyles never pay the scan.
+        var needsSeed = true
+        var contiguousEnd: Int?
+        for block in blocks {
+            if let contiguousEnd, block.range.location > contiguousEnd,
+               ns.rangeOfCharacter(from: Self.nonWhitespace, options: [],
+                                   range: NSRange(location: contiguousEnd,
+                                                  length: block.range.location - contiguousEnd)).location != NSNotFound {
+                // Only CONTENT in the hole ends the run. A hole of pure blank
+                // lines is loose-list spacing — and it is the shape the
+                // coordinator's forward walk hands us (list, list, list, blanks
+                // skipped), where re-seeding meant one full backward scan per
+                // item: 639 ms for a single Return in an 800-item loose list.
+                counters = [:]
+                needsSeed = true
+            }
+            contiguousEnd = NSMaxRange(block.range)
+            switch block {
+            case .list(let listRange, let items):
+                // A scoped node carries only the items the scope reached, so the
+                // hole check has to bound BOTH ends of the item run against the
+                // block, not just the space between two materialized items: seeded
+                // with the block's start here, closed against its end below.
+                var previousItemEnd: Int? = listRange.location
+                for item in items {
+                    if let previousItemEnd,
+                       item.range.location > previousItemEnd {
+                        counters = [:]
+                        needsSeed = true
+                    }
+                    if item.ordered, let literal = item.number {
+                        if needsSeed {
+                            counters = seedOrderedCounters(above: item.marker.location, in: ns)
+                            needsSeed = false
+                        }
+                        let n = counters[item.indent] ?? literal
+                        result[item.marker.location] = n
+                        counters[item.indent] = n + 1
+                    } else {
+                        counters[item.indent] = nil
+                    }
+                    for key in counters.keys where key > item.indent { counters[key] = nil }
+                    previousItemEnd = NSMaxRange(item.range)
+                }
+                // Items the scope dropped from the TAIL are not "already counted".
+                // Leaving contiguousEnd at the block's end hides them, so the next
+                // block sees only the blank separator, reads it as loose-list
+                // spacing, and carries a short count into a fresh run. Ending the
+                // stretch at the last materialized item turns them back into the
+                // content hole they are.
+                if let previousItemEnd, previousItemEnd < NSMaxRange(listRange) {
+                    contiguousEnd = previousItemEnd
+                }
+            case .blank:
+                break                     // blank lines keep the count (spacing, not a reset)
+            case .paragraph(_, let inlines) where inlines.isEmpty:
+                break                     // an empty paragraph line is spacing too
+            default:
+                counters = [:]            // real text/content ends the run
+                needsSeed = false         // a seed scan would stop on this line anyway
+            }
+        }
+        return result
     }
 
     /// AST list-item decoration: indent paragraph, `•` bullet, checkbox + strikethrough, all caret-aware.
-    private static func styleListItem(_ item: ListItem, ctx: Ctx, into attrs: inout [StyledRange]) {
-        guard ctx.config.lists.helpersEnabled else { return }
+    private static func styleListItem(_ item: ListItem, displayNumber: Int?, ctx: Ctx, into attrs: inout [StyledRange]) {
+        // `helpersEnabled` switches EDITING conveniences (auto-continue,
+        // auto-indent, `- ` → `•`) — its own doc promises lists still render.
+        // Returning here for every item also dropped the `.taskCheckbox`
+        // attribute, and drawing, the hit test and the toggle all read that
+        // one attribute, so switching the helpers off removed task lists from
+        // the app altogether (#1031). A task item keeps its box; the bullet
+        // and number overlays stay with the helpers.
+        let helpers = ctx.config.lists.helpersEnabled
+        guard helpers || item.checkbox != nil else { return }
 
         // Line content (item line minus its trailing newline).
         var line = item.range
@@ -225,10 +413,66 @@ enum MarkdownASTStyler {
             markerGroup = NSRange(location: item.marker.location,
                                   length: item.contentRange.location - item.marker.location)
         }
-        let markerWidth = (ctx.ns.substring(with: markerGroup) as NSString)
-            .size(withAttributes: [.font: ctx.baseFont]).width
+        // An ordered item whose displayed number differs from its source digit
+        // gets its WHOLE marker overlaid (below); the hanging indent must then
+        // measure the DISPLAY marker so wrapped lines align at any digit count.
+        // Off for tasks (the checkbox branch owns those).
+        //
+        // Neither the caret nor a selection takes the overlay down. Every other
+        // markdown construct reveals its source under one, but an ordered
+        // marker's source digit is the one thing the reader never authored: it
+        // is positional, and a run written `1./1./1.` would flip a number back
+        // to `1.` on a plain click or a ⌘A. The digits stay hidden and the
+        // painter keeps drawing the display number under the selection
+        // highlight, which is sized to the same kerned slot.
+        let orderedOverlayActive = item.ordered && item.checkbox == nil && item.number != nil
+            && displayNumber != nil && displayNumber != item.number
+        // Keep the source punctuation (`.` or `)`) when overlaying, so a paren list stays a paren list.
+        let orderedPunct = orderedOverlayActive && item.marker.length > 0
+            ? ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker) - 1, length: 1)) : "."
+        // Via the memoized measure — list markers are a tiny repeated set (`- `, `1. `).
+        let markerWidth: CGFloat = {
+            if orderedOverlayActive, let displayNumber {
+                let gap = ctx.ns.substring(with: NSRange(location: NSMaxRange(item.marker),
+                                                         length: item.contentRange.location - NSMaxRange(item.marker)))
+                return HeadingHelpers.textWidth("\(displayNumber)\(orderedPunct)" + gap, font: ctx.baseFont)
+            }
+            return HeadingHelpers.textWidth(ctx.ns.substring(with: markerGroup), font: ctx.baseFont)
+        }()
         let depthIndent = CGFloat(MarkdownLists.indentLevel(from: ws)) * ctx.config.lists.indentPerLevel
         let ps = NSMutableParagraphStyle()
+        guard helpers else {
+            // Helpers off means NO list indent — but the box is drawn to the
+            // LEFT of the content (`boxX = contentX - size - gap`), so a task
+            // line gets exactly that much room and not a point more. Without
+            // it the box lands at x ≈ -9, off the edge (measured).
+            //
+            // Everything else here mirrors the BASE paragraph style
+            // (`TextStylingService.makeBaseFontAndStyle`) rather than being
+            // left at its defaults. A paragraph style replaces the base one
+            // wholesale, so an unpinned line height let the line fall back to
+            // the font's natural height: the content height flipped 26 ↔ 24
+            // as the line crossed in and out of being a task item, and the
+            // text below jumped by those 2pt on the way.
+            let room = max(0, TaskCheckboxGeometry.size(for: ctx.baseFont)
+                              + TaskCheckboxGeometry.gap - markerWidth)
+            ps.minimumLineHeight = ctx.baseLineHeight + ctx.config.paragraph.lineHeightExtraSpacing
+            ps.lineSpacing = 0
+            ps.paragraphSpacing = ctx.baseParagraphSpacing
+            ps.paragraphSpacingBefore = 0
+            ps.lineBreakMode = .byWordWrapping
+            ps.tabStops = (1...24).map {
+                NSTextTab(textAlignment: .left, location: CGFloat($0) * ctx.config.lists.indentPerLevel)
+            }
+            ps.defaultTabInterval = 0
+            ps.firstLineHeadIndent = room
+            ps.headIndent = room + markerWidth
+            attrs.append((line, [.paragraphStyle: ps]))
+            if let box = item.checkbox, !taskRevealed {
+                styleTaskMarker(item, box: box, ctx: ctx, into: &attrs)
+            }
+            return
+        }
         let lineHeight = ctx.baseLineHeight + ctx.config.lists.extraLineHeight
         ps.minimumLineHeight = lineHeight
         ps.maximumLineHeight = lineHeight
@@ -249,35 +493,73 @@ enum MarkdownASTStyler {
         // 2. Marker decoration (suppressed while the caret edits the syntax).
         if let box = item.checkbox {
             if taskRevealed { return }
-            let spacer = NSRange(location: NSMaxRange(item.marker), length: box.location - NSMaxRange(item.marker))
-            // `- ` keeps full advance (the box's slot, like the bullet `•`);
-            // `[ ]` + trailing space collapse to the hidden-marker font so the
-            // content starts at the bullet-content x.
-            attrs.append((item.marker, [.foregroundColor: NSColor.clear]))
-            if spacer.length > 0 { attrs.append((spacer, [.foregroundColor: NSColor.clear])) }
-            attrs.append((box, [.taskCheckbox: item.checked, .foregroundColor: NSColor.clear,
-                                .font: ctx.inlineMarkerFont]))
-            let postGap = NSRange(location: NSMaxRange(box),
-                                  length: item.contentRange.location - NSMaxRange(box))
-            if postGap.length > 0 {
-                attrs.append((postGap, [.foregroundColor: NSColor.clear, .font: ctx.inlineMarkerFont]))
-            }
-            if item.checked, NSMaxRange(item.range) > NSMaxRange(box) {
-                attrs.append((NSRange(location: NSMaxRange(box), length: NSMaxRange(item.range) - NSMaxRange(box)), [
-                    .strikethroughStyle: NSUnderlineStyle.single.rawValue,
-                    .strikethroughColor: ctx.theme.strikethroughColor,
-                ]))
-            }
+            styleTaskMarker(item, box: box, ctx: ctx, into: &attrs)
         } else if !item.ordered {
             let syntax = NSRange(location: item.marker.location,
                                  length: item.contentRange.location - item.marker.location)
             if NSLocationInRange(ctx.caret, syntax) { return }
             attrs.append((item.marker, [.bulletMarker: true, .foregroundColor: NSColor.clear]))
+        } else if orderedOverlayActive, let displayNumber {
+            // Hide the ENTIRE source marker (digits + dot) as one unit and paint
+            // the whole display marker "N." over it, so the dot travels with the
+            // digits.
+            //
+            // Hidden by SIZE, like every other marker this engine hides, not by a
+            // clear colour: NSTextView.selectedTextAttributes carries a
+            // `selectedTextColor`, so it repaints every selected glyph opaque —
+            // a colour-hidden marker comes back under the highlight and collides
+            // with the number painted over it. A shrunken run cannot be
+            // repainted into visibility. The colour stays as a second line of
+            // defence against sub-pixel residue at extreme zoom.
+            //
+            // Kern that near-zero run back out to the display marker's width so
+            // the slot, the hanging indent and the selection highlight all
+            // measure the same thing. Horizontal only — a scaled-UP font would
+            // inflate the marker ascent and push the content baseline down under
+            // the pinned line height.
+            let hiddenW = (ctx.ns.substring(with: item.marker) as NSString)
+                .size(withAttributes: [.font: ctx.inlineMarkerFont]).width
+            let displayW = ("\(displayNumber)\(orderedPunct)" as NSString)
+                .size(withAttributes: [.font: ctx.baseFont]).width
+            var markerAttrs: [NSAttributedString.Key: Any] = [
+                .orderedMarker: "\(displayNumber)\(orderedPunct)",
+                .foregroundColor: NSColor.clear,
+                .font: ctx.inlineMarkerFont,
+            ]
+            if abs(displayW - hiddenW) > 0.01 {
+                markerAttrs[.kern] = (displayW - hiddenW) / CGFloat(max(1, item.marker.length))
+            }
+            attrs.append((item.marker, markerAttrs))
+        }
+    }
+
+    /// A task item's own decoration, shared by both geometries: hide `- [ ] `,
+    /// hang the drawn box on the `[ ]` range, strike a checked item through.
+    private static func styleTaskMarker(_ item: ListItem, box: NSRange, ctx: Ctx,
+                                        into attrs: inout [StyledRange]) {
+        let spacer = NSRange(location: NSMaxRange(item.marker), length: box.location - NSMaxRange(item.marker))
+        // `- ` keeps full advance (the box's slot, like the bullet `•`);
+        // `[ ]` + trailing space collapse to the hidden-marker font so the
+        // content starts at the bullet-content x.
+        attrs.append((item.marker, [.foregroundColor: NSColor.clear]))
+        if spacer.length > 0 { attrs.append((spacer, [.foregroundColor: NSColor.clear])) }
+        attrs.append((box, [.taskCheckbox: item.checked, .foregroundColor: NSColor.clear,
+                            .font: ctx.inlineMarkerFont]))
+        let postGap = NSRange(location: NSMaxRange(box),
+                              length: item.contentRange.location - NSMaxRange(box))
+        if postGap.length > 0 {
+            attrs.append((postGap, [.foregroundColor: NSColor.clear, .font: ctx.inlineMarkerFont]))
+        }
+        if item.checked, NSMaxRange(item.range) > NSMaxRange(box) {
+            attrs.append((NSRange(location: NSMaxRange(box), length: NSMaxRange(item.range) - NSMaxRange(box)), [
+                .strikethroughStyle: NSUnderlineStyle.single.rawValue,
+                .strikethroughColor: ctx.theme.strikethroughColor,
+            ]))
         }
     }
 
     private static func styleAutoLinks(ctx: Ctx, codeRanges: [NSRange], linkRanges: [NSRange], into attrs: inout [StyledRange]) {
-        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else { return }
+        guard let detector = autoLinkDetector else { return }
         for scan in ctx.scanRanges {
             detector.enumerateMatches(in: ctx.text, range: scan) { match, _, _ in
                 // Skip URLs inside code and inside a markdown/wiki link's own range — a link's
@@ -291,19 +573,37 @@ enum MarkdownASTStyler {
     }
 
     private static func styleIncompleteLinkBrackets(ctx: Ctx, codeRanges: [NSRange], checkboxRanges: [NSRange], into attrs: inout [StyledRange]) {
-        let patterns = [#"\[\]"#, #"\[\[\]\]"#, #"\[[^\]\r\n]*$"#, #"\[[^\]\r\n]+\](?!\()"#,
-                        #"\[[^\]\r\n]+\]\([^)\r\n]*$"#, #"\[[^\]\r\n]+\]\(\)"#]
+        // Every pattern starts with `\[`, so no `[` in the text ⇒ no match: skip
+        // all 6 regex sweeps (the 78ms on hits=0 docs).
+        guard ctx.ns.range(of: "[").location != NSNotFound else { return }
         let muted = ctx.theme.mutedText
         let faded = ctx.theme.incompleteLink.withAlphaComponent(ctx.config.link.incompleteLinkAlpha)
-        for pattern in patterns {
-            guard let re = regex(pattern, false) else { continue }
+        for re in incompleteLinkPatterns {
             for scan in ctx.scanRanges {
               for m in re.matches(in: ctx.text, options: [], range: scan)
                   where !isInCode(m.range, codeRanges) && !isInCode(m.range, checkboxRanges) {
-                for (i, ch) in ctx.ns.substring(with: m.range).enumerated() {
-                    let r = NSRange(location: m.range.location + i, length: 1)
+                // One range per RUN of same-colored characters, not per character: a
+                // single `[Design System]` used to emit 15 ranges, and the note in the
+                // bug report reached 25,504 from this pass alone — every one of them a
+                // separate storage mutation downstream.
+                var runStart = m.range.location
+                var runLength = 0
+                var runIsBracket = false
+                for ch in ctx.ns.substring(with: m.range) {
                     let isBracket = ch == "[" || ch == "]" || ch == "(" || ch == ")"
-                    attrs.append((r, [.foregroundColor: isBracket ? muted : faded]))
+                    let width = ch.utf16.count
+                    if runLength > 0, isBracket != runIsBracket {
+                        attrs.append((NSRange(location: runStart, length: runLength),
+                                      [.foregroundColor: runIsBracket ? muted : faded]))
+                        runStart += runLength
+                        runLength = 0
+                    }
+                    runIsBracket = isBracket
+                    runLength += width
+                }
+                if runLength > 0 {
+                    attrs.append((NSRange(location: runStart, length: runLength),
+                                  [.foregroundColor: runIsBracket ? muted : faded]))
                 }
               }
             }
@@ -311,7 +611,9 @@ enum MarkdownASTStyler {
     }
 
     /// Shared inputs threaded through the walk.
-    private struct Ctx {
+    /// Internal (not private) so per-construct styling can live in its own
+    /// file — see `MarkdownASTStyler+Directives.swift`.
+    struct Ctx {
         let ns: NSString
         let fontName: String
         let baseFont: NSFont
@@ -333,6 +635,7 @@ enum MarkdownASTStyler {
         let extensionsByID: [String: any MarkdownExtension]
         let wikiLinkID: (NSRange) -> String?
         let scopedRanges: [NSRange]?
+        let orderedDisplayNumbers: [Int: Int]
 
         /// True when a non-empty selection overlaps `range` — the selection
         /// counterpart of `isActive` for elements that reveal on select.
@@ -391,7 +694,8 @@ enum MarkdownASTStyler {
 
         case .list(_, let items):
             for item in items {
-                styleListItem(item, ctx: ctx, into: &attrs)
+                styleListItem(item, displayNumber: ctx.orderedDisplayNumbers[item.marker.location],
+                              ctx: ctx, into: &attrs)
                 styleInlines(item.inlines, font: font, ctx: ctx, into: &attrs)
             }
 
@@ -558,6 +862,18 @@ enum MarkdownASTStyler {
                 styleInlines(children, font: composed, ctx: ctx, into: &attrs)
 
             case .ext(let node):
+                // Directives come through the same node shape under a reserved
+                // id namespace. They compose a font TRANSFORM over the
+                // inherited font and hand it down, so emphasis nested in the
+                // body keeps both (`@font(size: 18){**bold**}` is bold AND
+                // 18pt). Non-directive nodes fall through unchanged.
+                if let bodyFont = directiveBodyFont(for: node, font: font, ctx: ctx, into: &attrs) {
+                    if ctx.isActive(node.range) {
+                        for marker in node.markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+                    }
+                    styleInlines(node.children, font: bodyFont, ctx: ctx, into: &attrs)
+                    break
+                }
                 // Extension-contributed span: the extension supplies content
                 // ATTRIBUTES only; every range comes from the parser, so a
                 // misbehaving extension can restyle its own span at worst.
@@ -613,6 +929,9 @@ enum MarkdownASTStyler {
             }
         }
         for marker in markers { attrs.append((marker, [.foregroundColor: ctx.theme.mutedText])) }
+        // The target is syntax, revealed with its brackets and muted like them —
+        // at body color it is louder than the label it belongs to.
+        if isActive { attrs.append((urlRange, [.foregroundColor: ctx.theme.mutedText])) }
         styleInlines(children, font: font, ctx: ctx, into: &attrs)
     }
 

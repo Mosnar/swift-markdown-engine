@@ -7,6 +7,7 @@ Sources/
 ├── MarkdownEngine/                          # core target — zero deps
 │   ├── Configuration/                       # MarkdownEditorConfiguration + MarkdownEditorTheme
 │   ├── Extensions/                          # the extension seam: MarkdownExtension + bundled opt-ins
+│   ├── Directives/                          # the directive seam: @font(size: 18){…} — parsing, styling, glyphs, completion
 │   ├── Services/                            # 4 protocols, no-op defaults, WikiLinkService
 │   ├── Parser/                              # two-phase AST: BlockParser → InlineParser → DocumentAST (+ token projection)
 │   ├── Styling/                             # MarkdownASTStyler (AST walk) + MarkdownStyler facade for NSImage passes
@@ -45,7 +46,10 @@ regexes are gone, replaced by hand-written scanners and a real syntax tree.
    escapes → link family (`![[…]]`, `[[…]]`, `![…](…)`, `[…](…)`, `~~…~~`,
    `$…$`) → emphasis (`*`/`_` delimiter runs) → `buildTree`. Each pass claims
    spans only in regions not already claimed, so there are never partial
-   overlaps and the tree is a clean containment tree.
+   overlaps and the tree is a clean containment tree. That invariant is also
+   what keeps the pass linear in span count: claimed ranges are consulted
+   through a cursor rather than rescanned, and `buildTree` derives containment
+   from a sort instead of comparing spans pairwise.
 3. **`MarkdownAST` / `DocumentAST.parse`** combines the two into the semantic
    document AST — `[BlockNode]`, each inline-bearing block carrying its parsed
    `[InlineNode]` children in absolute document coordinates. `BlockNode`,
@@ -84,6 +88,89 @@ registered set can change at runtime.
 
 **Invariant:** built-in constructs always classify first; an extension can
 never take text away from core markdown.
+
+## [`Directives/`](Sources/MarkdownEngine/Directives): named inline commands
+
+`MarkdownDirective` is the extension seam's sibling for constructs that need a
+NAME and TYPED ARGUMENTS rather than delimiters — `@pagebreak`,
+`@font(size: 18){text}`. Registered via `MarkdownEditorConfiguration.directives`;
+the marker defaults to `@` and is configurable per registry and per directive.
+
+Two forms, both **tree-shaped** — a directive's effect never escapes its own
+node: **self-contained** (`@pagebreak`, a leaf that draws a glyph in place of
+its collapsed source) and **container** (`@font(size: 18){text}`, whose body is
+re-parsed as markdown). There is deliberately no "applies to everything after
+me" form: that would make styling depend on document position rather than tree
+position, breaking both the styler's compose-on-descent model and the
+block-scoped incremental restyle.
+
+The glyph rides the same mechanism inline LaTeX uses: the characters stay in
+the text, the first one carries the image and enough kern to occupy its width,
+the rest collapse to zero width. A glyph that can't be produced (an unknown SF
+Symbol, or `.literal`) leaves the source visible rather than collapsing it to a
+gap the user can't see or fix.
+
+Container styling lives in `MarkdownASTStyler+Directives.swift`: it resolves the
+directive, coerces its arguments against the declared schema, and returns the
+composed font the body's children inherit — one more step in the styler's
+existing compose-on-descent walk. `MarkdownHTMLRenderer` recovers arguments from
+the same prefix geometry, so rich copy and on-screen styling cannot disagree
+about what was passed.
+
+`DirectiveScanner` runs from `InlineParser.matchClaimedSpan` after every
+built-in, so a directive can never take text away from core markdown. Matches
+project into the AST as **extension-shaped nodes** (`InlineNode.ext`) under the
+reserved `directive.` id namespace, rather than as a new node kind — so
+`InlineNode`, `buildTree`, `offsetNodes`, `InlineASTAdapter`, `MarkdownToken`,
+and `shrinkInlineMarkers` are untouched, and directives inherit marker shrink,
+caret reveal, token projection, incremental restyle, and rich copy unchanged.
+
+`DirectiveRegistry` is carried BY `ExtensionRegistry`, so the directive
+fingerprint folds into the one grammar fingerprint every parse cache already
+keys on — registering a directive at runtime invalidates those caches with no
+second key threaded through the pipeline. A directive-free registry produces a
+byte-identical fingerprint to before the seam existed, so no existing document
+re-parses.
+
+Arguments are coerced against the declared schema at STYLING time, not parse
+time: the parser stays geometry-only, and a directive-free document pays
+nothing.
+
+**Invariant:** registered names only. `@home` in prose stays literal text unless
+`home` is registered — the property that makes the seam safe to enable over an
+existing corpus.
+
+**Invariant:** a directive opens only after a non-word character, so
+`name@example.com` never opens one.
+
+**Invariant:** every rejection — unregistered name, malformed call, wrong form,
+unbalanced or multi-line run — leaves the candidate literal. Nothing here can
+produce a partial construct.
+
+### Autocomplete
+
+`DirectiveCompletionScanner` answers "what is the caret completing?" — a
+directive NAME (`@fo|`) or one of its ARGUMENT VALUES (`@icon(sta|`). It cannot
+use the AST: mid-typing, `@ico` and `@icon(sta` are precisely what the parser
+REJECTS, so it is a separate, forgiving backwards scan over the current line,
+bounded to 256 characters per caret move. It reuses the parser's boundary rule,
+so it can never offer a directive the parser would refuse.
+
+The engine owns the CANDIDATES because it owns the registry — names come from
+the registered directives, values from `MarkdownDirective.valueCompletions`,
+whose default answers whatever the declared schema can (closed keyword sets,
+booleans). A directive only implements it when its domain is dynamic or too
+large to declare, which is how `@flag` offers every ISO region without shipping
+a dataset. A newly registered directive therefore appears in the picker with no
+embedder change.
+
+The engine ships **no picker UI**, exactly as for `[[wiki-links]]`: it publishes
+the context through `onDirectiveCompletion`, reports the anchor via
+`onCaretRectChange`, routes ↑/↓/↵/Esc through `onInlinePreviewKey`, and applies
+a pick pushed into `pendingDirectiveCompletion`. Detection and commit live in
+`Coordinator/NativeTextViewCoordinator+Directives.swift`; the commit path is
+deliberately separate from `applyInlineReplacement`, which runs the wiki-link
+storage/display transform.
 
 ## [`Services/`](Sources/MarkdownEngine/Services): how does the engine talk to your app?
 

@@ -31,6 +31,7 @@ extension NativeTextView {
             NSCursor.arrow.set()
         } else {
             applyReadOnlyCursor(for: event)
+            applyInvertedIBeamIfNeeded(for: event)
         }
         updateAutomaticLinkHover(for: event)
     }
@@ -45,6 +46,7 @@ extension NativeTextView {
         } else {
             super.mouseEntered(with: event)
             applyReadOnlyCursor(for: event)
+            applyInvertedIBeamIfNeeded(for: event)
         }
         updateAutomaticLinkHover(for: event)
     }
@@ -193,6 +195,13 @@ extension NativeTextView {
     }
 
     private func linkHit(at viewPoint: CGPoint) -> (index: Int, range: NSRange)? {
+        guard let index = characterIndex(at: viewPoint), let textStorage else { return nil }
+        var effectiveRange = NSRange()
+        guard textStorage.attribute(.link, at: index, effectiveRange: &effectiveRange) != nil else { return nil }
+        return (index, effectiveRange)
+    }
+
+    private func characterIndex(at viewPoint: CGPoint) -> Int? {
         guard let tlm = textLayoutManager,
               let textStorage = textStorage, textStorage.length > 0 else { return nil }
 
@@ -220,8 +229,53 @@ extension NativeTextView {
         guard fragmentStart != NSNotFound else { return nil }
         let documentIndex = fragmentStart + indexInFragment
         guard documentIndex >= 0, documentIndex < textStorage.length else { return nil }
-        var effectiveRange = NSRange()
-        guard textStorage.attribute(.link, at: documentIndex, effectiveRange: &effectiveRange) != nil else { return nil }
-        return (documentIndex, effectiveRange)
+        return documentIndex
+    }
+
+    /// Attributes at the pointer use document offsets, including wrapped lines.
+    private func attributes(at viewPoint: CGPoint) -> [NSAttributedString.Key: Any]? {
+        guard let index = characterIndex(at: viewPoint) else { return nil }
+        return textStorage?.attributes(at: index, effectiveRange: nil)
+    }
+
+    /// Ink + block of a span that repaints its foreground under `event`, or nil.
+    /// Same rule as the caret color: only a run that carries BOTH a background
+    /// and a foreground of its own is inverted — inline code and find matches
+    /// paint a background but keep the body ink, and the system I-beam is
+    /// already right on those.
+    func invertedRunColors(at event: NSEvent) -> (ink: NSColor, block: NSColor)? {
+        guard configuration.cursorFollowsSpanInk else { return nil }
+        let attrs = attributes(at: convert(event.locationInWindow, from: nil))
+        guard let attrs,
+              let block = attrs[.backgroundColor] as? NSColor,
+              let ink = attrs[.foregroundColor] as? NSColor else { return nil }
+        // Resolve inside the view's appearance: these are dynamic colors, and
+        // `NSAppearance.current` during a mouse event is not necessarily ours —
+        // a dark editor would otherwise get the light-mode pair.
+        var resolved: (ink: NSColor, block: NSColor, body: NSColor)?
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            guard let ink = ink.usingColorSpace(.deviceRGB),
+                  let block = block.usingColorSpace(.deviceRGB),
+                  let body = configuration.theme.bodyText.usingColorSpace(.deviceRGB) else { return }
+            resolved = (ink, block, body)
+        }
+        guard let resolved else { return nil }
+        // Body ink on a background is inline code or a find match — the system
+        // I-beam is already right there; only a run that repaints its ink needs us.
+        guard resolved.ink != resolved.body else { return nil }
+        return (resolved.ink, resolved.block)
+    }
+
+    /// Over an inverted span the system I-beam is drawn in the block's own
+    /// color (macOS inverts it against the editor's backdrop, not against the
+    /// run under it), so it disappears. Swap in the same glyph recolored to the
+    /// span's own ink; anywhere else `super` keeps the system cursor.
+    func applyInvertedIBeamIfNeeded(for event: NSEvent) {
+        guard isEditable,
+              linkHit(at: convert(event.locationInWindow, from: nil)) == nil,
+              let colors = invertedRunColors(at: event),
+              let cursor = InvertedIBeamCursor.cursor(ink: colors.ink, block: colors.block)
+        else { return }
+        cursor.set()
     }
 }
